@@ -1,5 +1,9 @@
-// Vercel Serverless Function — fetches temporary TURN credentials from Metered.ca
-// Set METERED_API_KEY and METERED_APP_NAME in Vercel Environment Variables
+// Vercel Serverless Function — returns TURN server credentials
+//
+// Set these in Vercel Environment Variables:
+//   TURN_SERVER   — e.g. "free.expressturn.com:3478"
+//   TURN_USERNAME — e.g. "000000002088268790"
+//   TURN_PASSWORD — e.g. "uLmr+9TtQ+i7LMMOfg8OySpdqVA="
 
 const STUN_FALLBACK = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -7,36 +11,24 @@ const STUN_FALLBACK = [
 ];
 
 export default async function handler(req: any, res: any) {
-  // Only allow GET
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const apiKey = process.env.METERED_API_KEY;
-  const appName = process.env.METERED_APP_NAME;
+  const server = process.env.TURN_SERVER;
+  const username = process.env.TURN_USERNAME;
+  const password = process.env.TURN_PASSWORD;
 
-  if (!apiKey || !appName) {
-    // No TURN configured — return STUN-only (works on same network)
+  if (!server || !username || !password) {
     return res.status(200).json(STUN_FALLBACK);
   }
 
-  try {
-    const response = await fetch(
-      `https://${appName}.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`
-    );
+  const iceServers = [
+    { urls: `turn:${server}`, username, credential: password },
+    { urls: `turn:${server}?transport=tcp`, username, credential: password },
+  ];
 
-    if (!response.ok) {
-      console.error(`Metered API error: ${response.status}`);
-      return res.status(200).json(STUN_FALLBACK);
-    }
-
-    const iceServers = await response.json();
-
-    // Cache for 12 hours (credentials valid for ~24h)
-    res.setHeader("Cache-Control", "s-maxage=43200, stale-while-revalidate=3600");
-    return res.status(200).json(iceServers);
-  } catch (err) {
-    console.error("TURN credential fetch failed:", err);
-    return res.status(200).json(STUN_FALLBACK);
-  }
+  // Cache for 6 hours
+  res.setHeader("Cache-Control", "s-maxage=21600, stale-while-revalidate=3600");
+  return res.status(200).json(iceServers);
 }
