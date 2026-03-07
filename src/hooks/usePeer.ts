@@ -3,7 +3,8 @@ import Peer, { DataConnection } from "peerjs";
 import { PEER_CONFIG, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
 import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
 
-const GUEST_CONNECT_TIMEOUT_MS = 15_000;
+const GUEST_CONNECT_TIMEOUT_MS = 25_000;
+const MAX_CONNECT_RETRIES = 2;
 
 interface UsePeerOptions {
   pin: string;
@@ -166,6 +167,28 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       });
     }
 
+    let retryCount = 0;
+
+    function connectToHost() {
+      const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
+      setupConnection(hostConn);
+
+      guestTimeoutId = setTimeout(() => {
+        if (!connectionsRef.current.has(hostPeerId(pin))) {
+          // Retry: close failed connection and try again
+          if (retryCount < MAX_CONNECT_RETRIES) {
+            retryCount++;
+            console.log(`Connection attempt ${retryCount} failed, retrying...`);
+            hostConn.close();
+            connectToHost();
+          } else {
+            setError("Connection timed out. Check your PIN and try again.");
+            peer.destroy();
+          }
+        }
+      }, GUEST_CONNECT_TIMEOUT_MS);
+    }
+
     peer.on("open", () => {
       setIsConnected(true);
       setIsDisconnected(false);
@@ -173,15 +196,7 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         setUserId("User 1");
       } else {
         // Guest: connect to host AFTER our peer is registered with the signaling server
-        const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
-        setupConnection(hostConn);
-
-        guestTimeoutId = setTimeout(() => {
-          if (!connectionsRef.current.has(hostPeerId(pin))) {
-            setError("Connection timed out. Check your PIN and try again.");
-            peer.destroy();
-          }
-        }, GUEST_CONNECT_TIMEOUT_MS);
+        connectToHost();
       }
     });
 
