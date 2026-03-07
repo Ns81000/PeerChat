@@ -171,6 +171,17 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       setIsDisconnected(false);
       if (isHost) {
         setUserId("User 1");
+      } else {
+        // Guest: connect to host AFTER our peer is registered with the signaling server
+        const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
+        setupConnection(hostConn);
+
+        guestTimeoutId = setTimeout(() => {
+          if (!connectionsRef.current.has(hostPeerId(pin))) {
+            setError("Connection timed out. Check your PIN and try again.");
+            peer.destroy();
+          }
+        }, GUEST_CONNECT_TIMEOUT_MS);
       }
     });
 
@@ -194,18 +205,6 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       }
       setupConnection(conn);
     });
-
-    if (!isHost) {
-      const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
-      setupConnection(hostConn);
-
-      guestTimeoutId = setTimeout(() => {
-        if (!connectionsRef.current.has(hostPeerId(pin))) {
-          setError("Connection timed out. Check your PIN and try again.");
-          peer.destroy();
-        }
-      }, GUEST_CONNECT_TIMEOUT_MS);
-    }
 
     peer.on("error", (err) => {
       console.error("Peer error:", err);
