@@ -1,0 +1,237 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import Peer, { DataConnection } from "peerjs";
+import { PEER_CONFIG, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
+import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
+
+const GUEST_CONNECT_TIMEOUT_MS = 15_000;
+
+interface UsePeerOptions {
+  pin: string;
+  isHost: boolean;
+  onData: (data: PeerData, fromPeerId: string) => void;
+}
+
+interface UsePeerReturn {
+  isConnected: boolean;
+  isDisconnected: boolean;
+  isRoomFull: boolean;
+  error: string | null;
+  userCount: number;
+  userId: string;
+  send: (data: PeerData) => void;
+  sendBinary: (peerId: string, data: ArrayBuffer) => void;
+  disconnect: () => void;
+}
+
+export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn {
+  const [isConnected, setIsConnected] = useState(false);
+  const [isDisconnected, setIsDisconnected] = useState(false);
+  const [isRoomFull, setIsRoomFull] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [userCount, setUserCount] = useState(1);
+  const [userId, setUserId] = useState("");
+
+  const peerRef = useRef<Peer | null>(null);
+  const connectionsRef = useRef<Map<string, DataConnection>>(new Map());
+  const userLabelCounterRef = useRef(1);
+  const userLabelsRef = useRef<Map<string, string>>(new Map());
+  const onDataRef = useRef(onData);
+  onDataRef.current = onData;
+
+  const send = useCallback((data: PeerData) => {
+    connectionsRef.current.forEach((conn) => {
+      if (conn.open) {
+        conn.send(data);
+      }
+    });
+  }, []);
+
+  const sendBinary = useCallback((peerId: string, data: ArrayBuffer) => {
+    const conn = connectionsRef.current.get(peerId);
+    if (conn?.open) {
+      conn.send(data);
+    }
+  }, []);
+
+  const disconnect = useCallback(() => {
+    connectionsRef.current.forEach((conn) => conn.close());
+    connectionsRef.current.clear();
+    peerRef.current?.destroy();
+    peerRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!pin) return;
+
+    const myId = isHost ? hostPeerId(pin) : guestPeerId(pin);
+    const myLabel = isHost ? "User 1" : "";
+    let guestTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const peer = new Peer(myId, PEER_CONFIG);
+    peerRef.current = peer;
+
+    function setupConnection(conn: DataConnection) {
+      conn.on("open", () => {
+        if (guestTimeoutId) {
+          clearTimeout(guestTimeoutId);
+          guestTimeoutId = null;
+        }
+
+        connectionsRef.current.set(conn.peer, conn);
+        setUserCount(connectionsRef.current.size + 1);
+
+        if (isHost) {
+          userLabelCounterRef.current++;
+          const label = `User ${userLabelCounterRef.current}`;
+          userLabelsRef.current.set(conn.peer, label);
+
+          const peerList: PeerList = {
+            type: "peer-list",
+            peers: Array.from(connectionsRef.current.keys()).filter((id) => id !== conn.peer),
+            userLabel: label,
+          };
+          conn.send(peerList);
+
+          const joinMsg: PeerData = {
+            type: "system",
+            id: crypto.randomUUID(),
+            content: `${label} joined the room`,
+            timestamp: Date.now(),
+          };
+          send(joinMsg);
+          onDataRef.current(joinMsg, myId);
+        } else {
+          const hello: HelloMessage = {
+            type: "hello",
+            peerId: myId,
+            label: userId || myLabel,
+          };
+          conn.send(hello);
+        }
+      });
+
+      conn.on("data", (rawData) => {
+        const data = rawData as PeerData;
+
+        if (data.type === "peer-list") {
+          const peerListData = data as PeerList;
+          setUserId(peerListData.userLabel);
+
+          peerListData.peers.forEach((peerId) => {
+            if (!connectionsRef.current.has(peerId)) {
+              const newConn = peer.connect(peerId, { reliable: true });
+              setupConnection(newConn);
+            }
+          });
+          return;
+        }
+
+        if (data.type === "hello" && isHost) {
+          const helloData = data as HelloMessage;
+          if (helloData.label) {
+            userLabelsRef.current.set(conn.peer, helloData.label);
+          }
+          return;
+        }
+
+        if (data.type === "system") {
+          const sysMsg = data as SystemMessage;
+          if (sysMsg.content === "Room is full") {
+            setIsRoomFull(true);
+            setError("Room is full. Try again later.");
+            return;
+          }
+        }
+
+        onDataRef.current(data, conn.peer);
+      });
+
+      conn.on("close", () => {
+        const label = userLabelsRef.current.get(conn.peer) || "A user";
+        connectionsRef.current.delete(conn.peer);
+        userLabelsRef.current.delete(conn.peer);
+        setUserCount(connectionsRef.current.size + 1);
+
+        const leaveMsg: PeerData = {
+          type: "system",
+          id: crypto.randomUUID(),
+          content: `${label} left the room`,
+          timestamp: Date.now(),
+        };
+        onDataRef.current(leaveMsg, conn.peer);
+      });
+
+      conn.on("error", (err) => {
+        console.error("Connection error:", err);
+      });
+    }
+
+    peer.on("open", () => {
+      setIsConnected(true);
+      setIsDisconnected(false);
+      if (isHost) {
+        setUserId("User 1");
+      }
+    });
+
+    peer.on("disconnected", () => {
+      setIsDisconnected(true);
+    });
+
+    peer.on("connection", (conn) => {
+      if (connectionsRef.current.size >= MAX_USERS - 1) {
+        conn.on("open", () => {
+          const fullMsg: SystemMessage = {
+            type: "system",
+            id: crypto.randomUUID(),
+            content: "Room is full",
+            timestamp: Date.now(),
+          };
+          conn.send(fullMsg);
+          setTimeout(() => conn.close(), 500);
+        });
+        return;
+      }
+      setupConnection(conn);
+    });
+
+    if (!isHost) {
+      const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
+      setupConnection(hostConn);
+
+      guestTimeoutId = setTimeout(() => {
+        if (!connectionsRef.current.has(hostPeerId(pin))) {
+          setError("Connection timed out. Check your PIN and try again.");
+          peer.destroy();
+        }
+      }, GUEST_CONNECT_TIMEOUT_MS);
+    }
+
+    peer.on("error", (err) => {
+      console.error("Peer error:", err);
+      if (guestTimeoutId) {
+        clearTimeout(guestTimeoutId);
+        guestTimeoutId = null;
+      }
+      if (err.type === "peer-unavailable") {
+        setError("Room not found. Check your PIN and try again.");
+      } else if (err.type === "unavailable-id") {
+        setError("A room with this PIN already exists.");
+      } else {
+        setError(err.message || "Connection error");
+      }
+    });
+
+    return () => {
+      if (guestTimeoutId) {
+        clearTimeout(guestTimeoutId);
+      }
+      connectionsRef.current.forEach((conn) => conn.close());
+      connectionsRef.current.clear();
+      peer.destroy();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pin, isHost]);
+
+  return { isConnected, isDisconnected, isRoomFull, error, userCount, userId, send, sendBinary, disconnect };
+}
