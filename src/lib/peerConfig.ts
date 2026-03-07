@@ -1,33 +1,33 @@
 export const PEER_CONFIG = {
   host: "0.peerjs.com",
   secure: true,
-  debug: 0,
+  debug: 1,
   config: {
     iceServers: [
       // STUN servers for public IP discovery
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun1.l.google.com:19302" },
       { urls: "stun:stun.relay.metered.ca:80" },
-      // TURN relay servers for symmetric NAT traversal (mobile carriers, strict firewalls)
+      // Open Relay Project — free public TURN servers (https://www.metered.ca/tools/openrelay/)
       {
-        urls: "turn:global.relay.metered.ca:80",
-        username: "e8dd65b92f0bfbbc8d3e6783",
-        credential: "3n7+bMSs1MxKqkZl",
+        urls: "turn:openrelay.metered.ca:80",
+        username: "openrelayproject",
+        credential: "openrelayproject",
       },
       {
-        urls: "turn:global.relay.metered.ca:80?transport=tcp",
-        username: "e8dd65b92f0bfbbc8d3e6783",
-        credential: "3n7+bMSs1MxKqkZl",
+        urls: "turn:openrelay.metered.ca:443",
+        username: "openrelayproject",
+        credential: "openrelayproject",
       },
       {
-        urls: "turn:global.relay.metered.ca:443",
-        username: "e8dd65b92f0bfbbc8d3e6783",
-        credential: "3n7+bMSs1MxKqkZl",
+        urls: "turn:openrelay.metered.ca:443?transport=tcp",
+        username: "openrelayproject",
+        credential: "openrelayproject",
       },
       {
-        urls: "turns:global.relay.metered.ca:443?transport=tcp",
-        username: "e8dd65b92f0bfbbc8d3e6783",
-        credential: "3n7+bMSs1MxKqkZl",
+        urls: "turns:openrelay.metered.ca:443?transport=tcp",
+        username: "openrelayproject",
+        credential: "openrelayproject",
       },
     ],
   },

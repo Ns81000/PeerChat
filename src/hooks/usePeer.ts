@@ -165,6 +165,23 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       conn.on("error", (err) => {
         console.error("Connection error:", err);
       });
+
+      // Monitor ICE connection state for early failure detection
+      const checkIce = () => {
+        const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
+        if (!pc) return;
+        const handler = () => {
+          const state = pc.iceConnectionState;
+          console.log(`ICE state [${conn.peer}]: ${state}`);
+          if (state === "failed" || state === "disconnected") {
+            console.warn(`ICE ${state} for ${conn.peer}`);
+            conn.close();
+          }
+        };
+        pc.addEventListener("iceconnectionstatechange", handler);
+      };
+      // PeerJS populates peerConnection after a tick
+      setTimeout(checkIce, 500);
     }
 
     let retryCount = 0;
@@ -202,6 +219,11 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
 
     peer.on("disconnected", () => {
       setIsDisconnected(true);
+      // Auto-reconnect to signaling server (keeps existing data channels alive)
+      if (!peer.destroyed) {
+        console.log("Signaling disconnected, attempting reconnect...");
+        peer.reconnect();
+      }
     });
 
     peer.on("connection", (conn) => {
