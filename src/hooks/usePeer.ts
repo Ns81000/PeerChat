@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Peer, { DataConnection } from "peerjs";
-import { PEER_CONFIG, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
+import { PEER_CONFIG, STUN_SERVERS, fetchIceServers, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
 import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
 
 const GUEST_CONNECT_TIMEOUT_MS = 25_000;
@@ -64,227 +64,242 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
   useEffect(() => {
     if (!pin) return;
 
-    const myId = isHost ? hostPeerId(pin) : guestPeerId(pin);
-    const myLabel = isHost ? "User 1" : "";
+    let destroyed = false;
     let guestTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let retryCount = 0;
 
-    const peer = new Peer(myId, PEER_CONFIG);
-    peerRef.current = peer;
+    async function init() {
+      // Fetch TURN credentials from the API before creating the peer
+      let iceServers: RTCIceServer[];
+      try {
+        iceServers = await fetchIceServers();
+      } catch {
+        iceServers = STUN_SERVERS;
+      }
 
-    function setupConnection(conn: DataConnection) {
-      conn.on("open", () => {
+      if (destroyed) return;
+
+      console.log("ICE servers:", iceServers.map((s) => (typeof s.urls === "string" ? s.urls : s.urls[0])));
+
+      const myId = isHost ? hostPeerId(pin) : guestPeerId(pin);
+      const myLabel = isHost ? "User 1" : "";
+
+      const peer = new Peer(myId, {
+        ...PEER_CONFIG,
+        config: { iceServers },
+      });
+      peerRef.current = peer;
+
+      function setupConnection(conn: DataConnection) {
+        conn.on("open", () => {
+          if (guestTimeoutId) {
+            clearTimeout(guestTimeoutId);
+            guestTimeoutId = null;
+          }
+
+          connectionsRef.current.set(conn.peer, conn);
+          setUserCount(connectionsRef.current.size + 1);
+
+          if (isHost) {
+            userLabelCounterRef.current++;
+            const label = `User ${userLabelCounterRef.current}`;
+            userLabelsRef.current.set(conn.peer, label);
+
+            const peerList: PeerList = {
+              type: "peer-list",
+              peers: Array.from(connectionsRef.current.keys()).filter((id) => id !== conn.peer),
+              userLabel: label,
+            };
+            conn.send(peerList);
+
+            const joinMsg: PeerData = {
+              type: "system",
+              id: crypto.randomUUID(),
+              content: `${label} joined the room`,
+              timestamp: Date.now(),
+            };
+            send(joinMsg);
+            onDataRef.current(joinMsg, myId);
+          } else {
+            const hello: HelloMessage = {
+              type: "hello",
+              peerId: myId,
+              label: userId || myLabel,
+            };
+            conn.send(hello);
+          }
+        });
+
+        conn.on("data", (rawData) => {
+          const data = rawData as PeerData;
+
+          if (data.type === "peer-list") {
+            const peerListData = data as PeerList;
+            setUserId(peerListData.userLabel);
+
+            peerListData.peers.forEach((peerId) => {
+              if (!connectionsRef.current.has(peerId)) {
+                const newConn = peer.connect(peerId, { reliable: true });
+                setupConnection(newConn);
+              }
+            });
+            return;
+          }
+
+          if (data.type === "hello" && isHost) {
+            const helloData = data as HelloMessage;
+            if (helloData.label) {
+              userLabelsRef.current.set(conn.peer, helloData.label);
+            }
+            return;
+          }
+
+          if (data.type === "system") {
+            const sysMsg = data as SystemMessage;
+            if (sysMsg.content === "Room is full") {
+              setIsRoomFull(true);
+              setError("Room is full. Try again later.");
+              return;
+            }
+          }
+
+          onDataRef.current(data, conn.peer);
+        });
+
+        conn.on("close", () => {
+          const label = userLabelsRef.current.get(conn.peer) || "A user";
+          connectionsRef.current.delete(conn.peer);
+          userLabelsRef.current.delete(conn.peer);
+          setUserCount(connectionsRef.current.size + 1);
+
+          const leaveMsg: PeerData = {
+            type: "system",
+            id: crypto.randomUUID(),
+            content: `${label} left the room`,
+            timestamp: Date.now(),
+          };
+          onDataRef.current(leaveMsg, conn.peer);
+        });
+
+        conn.on("error", (err) => {
+          console.error("Connection error:", err);
+        });
+
+        // Monitor ICE connection state for failure detection
+        const checkIce = () => {
+          const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
+          if (!pc) return;
+          let disconnectedTimer: ReturnType<typeof setTimeout> | null = null;
+          const handler = () => {
+            const state = pc.iceConnectionState;
+            console.log(`ICE state [${conn.peer}]: ${state}`);
+
+            if (disconnectedTimer) {
+              clearTimeout(disconnectedTimer);
+              disconnectedTimer = null;
+            }
+
+            if (state === "failed") {
+              console.warn(`ICE failed for ${conn.peer}, closing connection`);
+              conn.close();
+            } else if (state === "disconnected") {
+              // Transient — give ICE 15s to recover via TURN relay
+              disconnectedTimer = setTimeout(() => {
+                if (pc.iceConnectionState === "disconnected") {
+                  console.warn(`ICE disconnected timeout for ${conn.peer}, closing`);
+                  conn.close();
+                }
+              }, 15_000);
+            } else if (state === "connected" || state === "completed") {
+              console.log(`ICE connected for ${conn.peer}`);
+            }
+          };
+          pc.addEventListener("iceconnectionstatechange", handler);
+        };
+        setTimeout(checkIce, 1000);
+      }
+
+      function connectToHost() {
+        const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
+        setupConnection(hostConn);
+
+        guestTimeoutId = setTimeout(() => {
+          if (!connectionsRef.current.has(hostPeerId(pin))) {
+            if (retryCount < MAX_CONNECT_RETRIES) {
+              retryCount++;
+              console.log(`Connection attempt ${retryCount} failed, retrying...`);
+              hostConn.close();
+              connectToHost();
+            } else {
+              setError("Connection timed out. Check your PIN and try again.");
+              peer.destroy();
+            }
+          }
+        }, GUEST_CONNECT_TIMEOUT_MS);
+      }
+
+      peer.on("open", () => {
+        setIsConnected(true);
+        setIsDisconnected(false);
+        if (isHost) {
+          setUserId("User 1");
+        } else {
+          connectToHost();
+        }
+      });
+
+      peer.on("disconnected", () => {
+        setIsDisconnected(true);
+        if (!peer.destroyed) {
+          console.log("Signaling disconnected, attempting reconnect...");
+          peer.reconnect();
+        }
+      });
+
+      peer.on("connection", (conn) => {
+        if (connectionsRef.current.size >= MAX_USERS - 1) {
+          conn.on("open", () => {
+            const fullMsg: SystemMessage = {
+              type: "system",
+              id: crypto.randomUUID(),
+              content: "Room is full",
+              timestamp: Date.now(),
+            };
+            conn.send(fullMsg);
+            setTimeout(() => conn.close(), 500);
+          });
+          return;
+        }
+        setupConnection(conn);
+      });
+
+      peer.on("error", (err) => {
+        console.error("Peer error:", err);
         if (guestTimeoutId) {
           clearTimeout(guestTimeoutId);
           guestTimeoutId = null;
         }
-
-        connectionsRef.current.set(conn.peer, conn);
-        setUserCount(connectionsRef.current.size + 1);
-
-        if (isHost) {
-          userLabelCounterRef.current++;
-          const label = `User ${userLabelCounterRef.current}`;
-          userLabelsRef.current.set(conn.peer, label);
-
-          const peerList: PeerList = {
-            type: "peer-list",
-            peers: Array.from(connectionsRef.current.keys()).filter((id) => id !== conn.peer),
-            userLabel: label,
-          };
-          conn.send(peerList);
-
-          const joinMsg: PeerData = {
-            type: "system",
-            id: crypto.randomUUID(),
-            content: `${label} joined the room`,
-            timestamp: Date.now(),
-          };
-          send(joinMsg);
-          onDataRef.current(joinMsg, myId);
+        if (err.type === "peer-unavailable") {
+          setError("Room not found. Check your PIN and try again.");
+        } else if (err.type === "unavailable-id") {
+          setError("A room with this PIN already exists.");
         } else {
-          const hello: HelloMessage = {
-            type: "hello",
-            peerId: myId,
-            label: userId || myLabel,
-          };
-          conn.send(hello);
+          setError(err.message || "Connection error");
         }
       });
-
-      conn.on("data", (rawData) => {
-        const data = rawData as PeerData;
-
-        if (data.type === "peer-list") {
-          const peerListData = data as PeerList;
-          setUserId(peerListData.userLabel);
-
-          peerListData.peers.forEach((peerId) => {
-            if (!connectionsRef.current.has(peerId)) {
-              const newConn = peer.connect(peerId, { reliable: true });
-              setupConnection(newConn);
-            }
-          });
-          return;
-        }
-
-        if (data.type === "hello" && isHost) {
-          const helloData = data as HelloMessage;
-          if (helloData.label) {
-            userLabelsRef.current.set(conn.peer, helloData.label);
-          }
-          return;
-        }
-
-        if (data.type === "system") {
-          const sysMsg = data as SystemMessage;
-          if (sysMsg.content === "Room is full") {
-            setIsRoomFull(true);
-            setError("Room is full. Try again later.");
-            return;
-          }
-        }
-
-        onDataRef.current(data, conn.peer);
-      });
-
-      conn.on("close", () => {
-        const label = userLabelsRef.current.get(conn.peer) || "A user";
-        connectionsRef.current.delete(conn.peer);
-        userLabelsRef.current.delete(conn.peer);
-        setUserCount(connectionsRef.current.size + 1);
-
-        const leaveMsg: PeerData = {
-          type: "system",
-          id: crypto.randomUUID(),
-          content: `${label} left the room`,
-          timestamp: Date.now(),
-        };
-        onDataRef.current(leaveMsg, conn.peer);
-      });
-
-      conn.on("error", (err) => {
-        console.error("Connection error:", err);
-      });
-
-      // Monitor ICE connection state for failure detection
-      const checkIce = () => {
-        const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
-        if (!pc) return;
-        let disconnectedTimer: ReturnType<typeof setTimeout> | null = null;
-        const handler = () => {
-          const state = pc.iceConnectionState;
-          console.log(`ICE state [${conn.peer}]: ${state}`);
-
-          // Clear any pending disconnect timer on state change
-          if (disconnectedTimer) {
-            clearTimeout(disconnectedTimer);
-            disconnectedTimer = null;
-          }
-
-          if (state === "failed") {
-            // ICE completely failed — no route found even via TURN
-            console.warn(`ICE failed for ${conn.peer}, closing connection`);
-            conn.close();
-          } else if (state === "disconnected") {
-            // "disconnected" is transient — ICE may recover via TURN relay.
-            // Only close if it doesn't recover within 10 seconds.
-            disconnectedTimer = setTimeout(() => {
-              if (pc.iceConnectionState === "disconnected") {
-                console.warn(`ICE disconnected timeout for ${conn.peer}, closing`);
-                conn.close();
-              }
-            }, 10_000);
-          } else if (state === "connected" || state === "completed") {
-            console.log(`ICE connected for ${conn.peer}`);
-          }
-        };
-        pc.addEventListener("iceconnectionstatechange", handler);
-      };
-      // PeerJS populates peerConnection after a tick
-      setTimeout(checkIce, 1000);
     }
 
-    let retryCount = 0;
-
-    function connectToHost() {
-      const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
-      setupConnection(hostConn);
-
-      guestTimeoutId = setTimeout(() => {
-        if (!connectionsRef.current.has(hostPeerId(pin))) {
-          // Retry: close failed connection and try again
-          if (retryCount < MAX_CONNECT_RETRIES) {
-            retryCount++;
-            console.log(`Connection attempt ${retryCount} failed, retrying...`);
-            hostConn.close();
-            connectToHost();
-          } else {
-            setError("Connection timed out. Check your PIN and try again.");
-            peer.destroy();
-          }
-        }
-      }, GUEST_CONNECT_TIMEOUT_MS);
-    }
-
-    peer.on("open", () => {
-      setIsConnected(true);
-      setIsDisconnected(false);
-      if (isHost) {
-        setUserId("User 1");
-      } else {
-        // Guest: connect to host AFTER our peer is registered with the signaling server
-        connectToHost();
-      }
-    });
-
-    peer.on("disconnected", () => {
-      setIsDisconnected(true);
-      // Auto-reconnect to signaling server (keeps existing data channels alive)
-      if (!peer.destroyed) {
-        console.log("Signaling disconnected, attempting reconnect...");
-        peer.reconnect();
-      }
-    });
-
-    peer.on("connection", (conn) => {
-      if (connectionsRef.current.size >= MAX_USERS - 1) {
-        conn.on("open", () => {
-          const fullMsg: SystemMessage = {
-            type: "system",
-            id: crypto.randomUUID(),
-            content: "Room is full",
-            timestamp: Date.now(),
-          };
-          conn.send(fullMsg);
-          setTimeout(() => conn.close(), 500);
-        });
-        return;
-      }
-      setupConnection(conn);
-    });
-
-    peer.on("error", (err) => {
-      console.error("Peer error:", err);
-      if (guestTimeoutId) {
-        clearTimeout(guestTimeoutId);
-        guestTimeoutId = null;
-      }
-      if (err.type === "peer-unavailable") {
-        setError("Room not found. Check your PIN and try again.");
-      } else if (err.type === "unavailable-id") {
-        setError("A room with this PIN already exists.");
-      } else {
-        setError(err.message || "Connection error");
-      }
-    });
+    init();
 
     return () => {
+      destroyed = true;
       if (guestTimeoutId) {
         clearTimeout(guestTimeoutId);
       }
       connectionsRef.current.forEach((conn) => conn.close());
       connectionsRef.current.clear();
-      peer.destroy();
+      peerRef.current?.destroy();
+      peerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pin, isHost]);

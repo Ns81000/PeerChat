@@ -1,37 +1,32 @@
+/** Base PeerJS signaling config (without ICE servers — those are fetched dynamically) */
 export const PEER_CONFIG = {
   host: "0.peerjs.com",
   secure: true,
   debug: 1,
-  config: {
-    iceServers: [
-      // STUN servers for public IP discovery
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun.relay.metered.ca:80" },
-      // Open Relay Project — free public TURN servers (https://www.metered.ca/tools/openrelay/)
-      {
-        urls: "turn:openrelay.metered.ca:80",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443?transport=tcp",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turns:openrelay.metered.ca:443?transport=tcp",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-    ],
-  },
 };
+
+/** Minimal STUN-only config used as fallback when TURN credentials are unavailable */
+export const STUN_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
+/**
+ * Fetches dynamic TURN credentials from the Vercel API route (/api/turn).
+ * Falls back to STUN-only if the API is unavailable (e.g. local dev).
+ */
+export async function fetchIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const res = await fetch("/api/turn");
+    if (!res.ok) return STUN_SERVERS;
+    const servers: RTCIceServer[] = await res.json();
+    // Merge: always include our own STUN servers + whatever TURN the API returns
+    return [...STUN_SERVERS, ...servers];
+  } catch {
+    // Local dev or network error — STUN only (works on same network)
+    return STUN_SERVERS;
+  }
+}
 
 export const CHUNK_SIZE = 65536; // 64KB
 export const MAX_USERS = 10;
