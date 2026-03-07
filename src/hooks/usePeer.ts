@@ -166,22 +166,42 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         console.error("Connection error:", err);
       });
 
-      // Monitor ICE connection state for early failure detection
+      // Monitor ICE connection state for failure detection
       const checkIce = () => {
         const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
         if (!pc) return;
+        let disconnectedTimer: ReturnType<typeof setTimeout> | null = null;
         const handler = () => {
           const state = pc.iceConnectionState;
           console.log(`ICE state [${conn.peer}]: ${state}`);
-          if (state === "failed" || state === "disconnected") {
-            console.warn(`ICE ${state} for ${conn.peer}`);
+
+          // Clear any pending disconnect timer on state change
+          if (disconnectedTimer) {
+            clearTimeout(disconnectedTimer);
+            disconnectedTimer = null;
+          }
+
+          if (state === "failed") {
+            // ICE completely failed — no route found even via TURN
+            console.warn(`ICE failed for ${conn.peer}, closing connection`);
             conn.close();
+          } else if (state === "disconnected") {
+            // "disconnected" is transient — ICE may recover via TURN relay.
+            // Only close if it doesn't recover within 10 seconds.
+            disconnectedTimer = setTimeout(() => {
+              if (pc.iceConnectionState === "disconnected") {
+                console.warn(`ICE disconnected timeout for ${conn.peer}, closing`);
+                conn.close();
+              }
+            }, 10_000);
+          } else if (state === "connected" || state === "completed") {
+            console.log(`ICE connected for ${conn.peer}`);
           }
         };
         pc.addEventListener("iceconnectionstatechange", handler);
       };
       // PeerJS populates peerConnection after a tick
-      setTimeout(checkIce, 500);
+      setTimeout(checkIce, 1000);
     }
 
     let retryCount = 0;
