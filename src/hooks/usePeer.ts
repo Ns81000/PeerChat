@@ -68,6 +68,16 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
     let guestTimeoutId: ReturnType<typeof setTimeout> | null = null;
     let retryCount = 0;
 
+    // Reconnect signaling server when tab becomes visible after being backgrounded
+    const handleVisibilityChange = () => {
+      const peer = peerRef.current;
+      if (document.visibilityState === "visible" && peer && !peer.destroyed && peer.disconnected) {
+        console.log("Tab visible again, reconnecting signaling...");
+        peer.reconnect();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     async function init() {
       // Fetch TURN credentials from the API before creating the peer
       let iceServers: RTCIceServer[];
@@ -99,6 +109,7 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
 
           connectionsRef.current.set(conn.peer, conn);
           setUserCount(connectionsRef.current.size + 1);
+          setIsConnected(true);
 
           if (isHost) {
             userLabelCounterRef.current++;
@@ -189,27 +200,17 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         const checkIce = () => {
           const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
           if (!pc) return;
-          let disconnectedTimer: ReturnType<typeof setTimeout> | null = null;
           const handler = () => {
             const state = pc.iceConnectionState;
             console.log(`ICE state [${conn.peer}]: ${state}`);
-
-            if (disconnectedTimer) {
-              clearTimeout(disconnectedTimer);
-              disconnectedTimer = null;
-            }
 
             if (state === "failed") {
               console.warn(`ICE failed for ${conn.peer}, closing connection`);
               conn.close();
             } else if (state === "disconnected") {
-              // Transient — give ICE 15s to recover via TURN relay
-              disconnectedTimer = setTimeout(() => {
-                if (pc.iceConnectionState === "disconnected") {
-                  console.warn(`ICE disconnected timeout for ${conn.peer}, closing`);
-                  conn.close();
-                }
-              }, 15_000);
+              // Transient state — common when phone is locked or tab backgrounded.
+              // ICE will recover automatically or transition to "failed" if truly lost.
+              console.log(`ICE disconnected for ${conn.peer}, waiting for recovery...`);
             } else if (state === "connected" || state === "completed") {
               console.log(`ICE connected for ${conn.peer}`);
             }
@@ -239,9 +240,9 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       }
 
       peer.on("open", () => {
-        setIsConnected(true);
         setIsDisconnected(false);
         if (isHost) {
+          setIsConnected(true);
           setUserId("User 1");
         } else {
           connectToHost();
@@ -283,6 +284,9 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
           setError("Room not found. Check your PIN and try again.");
         } else if (err.type === "unavailable-id") {
           setError("A room with this PIN already exists.");
+        } else if (connectionsRef.current.size > 0) {
+          // Already have active data connections; signaling errors are non-fatal
+          console.warn("Signaling error (non-fatal, data connections active):", err.message);
         } else {
           setError(err.message || "Connection error");
         }
@@ -293,6 +297,7 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
 
     return () => {
       destroyed = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (guestTimeoutId) {
         clearTimeout(guestTimeoutId);
       }
