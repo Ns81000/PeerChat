@@ -78,18 +78,23 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    async function init() {
-      // Fetch TURN credentials from the API before creating the peer
-      let iceServers: RTCIceServer[];
-      try {
-        iceServers = await fetchIceServers();
-      } catch {
-        iceServers = STUN_SERVERS;
-      }
+    // Cache TURN servers so retries can use them without re-fetching
+    let cachedIceServers: RTCIceServer[] | null = null;
 
+    // Kick off TURN fetch immediately but don't block on it
+    const turnPromise = fetchIceServers().then((servers) => {
+      cachedIceServers = servers;
+      return servers;
+    }).catch(() => {
+      cachedIceServers = STUN_SERVERS;
+      return STUN_SERVERS;
+    });
+
+    function init(useServers?: RTCIceServer[]) {
       if (destroyed) return;
 
-      console.log("ICE servers:", iceServers.map((s) => (typeof s.urls === "string" ? s.urls : s.urls[0])));
+      // Use provided servers, cached servers, or STUN-only for fastest start
+      const iceServers = useServers || cachedIceServers || STUN_SERVERS;
 
       const myId = isHost ? hostPeerId(pin) : guestPeerId(pin);
       const myLabel = isHost ? "User 1" : "";
@@ -230,7 +235,15 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
               retryCount++;
               console.log(`Connection attempt ${retryCount} failed, retrying...`);
               hostConn.close();
-              connectToHost();
+
+              // On first retry, if TURN servers arrived, recreate peer with TURN
+              if (retryCount === 1 && cachedIceServers && cachedIceServers.length > STUN_SERVERS.length) {
+                console.log("Retrying with TURN servers...");
+                peer.destroy();
+                init(cachedIceServers);
+              } else {
+                connectToHost();
+              }
             } else {
               setError("Connection timed out. Check your PIN and try again.");
               peer.destroy();
@@ -293,6 +306,7 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       });
     }
 
+    // Start peer creation immediately with STUN — don't wait for TURN
     init();
 
     return () => {
