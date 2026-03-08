@@ -3,8 +3,9 @@ import Peer, { DataConnection } from "peerjs";
 import { PEER_CONFIG, STUN_SERVERS, fetchIceServers, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
 import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
 
-const GUEST_CONNECT_TIMEOUT_MS = 10_000;
+const GUEST_CONNECT_TIMEOUT_MS = 8_000;
 const MAX_CONNECT_RETRIES = 3;
+const TURN_WAIT_AFTER_OPEN_MS = 1_500;
 
 interface UsePeerOptions {
   pin: string;
@@ -78,30 +79,20 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // Cache TURN servers so retries can use them without re-fetching
-    let cachedIceServers: RTCIceServer[] | null = null;
+    // Kick off TURN fetch immediately — runs in parallel with Peer signaling registration
+    const turnPromise = fetchIceServers().catch(() => STUN_SERVERS);
 
-    // Kick off TURN fetch immediately but don't block on it
-    const turnPromise = fetchIceServers().then((servers) => {
-      cachedIceServers = servers;
-      return servers;
-    }).catch(() => {
-      cachedIceServers = STUN_SERVERS;
-      return STUN_SERVERS;
-    });
-
-    function init(useServers?: RTCIceServer[]) {
+    function init() {
       if (destroyed) return;
-
-      // Use provided servers, cached servers, or STUN-only for fastest start
-      const iceServers = useServers || cachedIceServers || STUN_SERVERS;
 
       const myId = isHost ? hostPeerId(pin) : guestPeerId(pin);
       const myLabel = isHost ? "User 1" : "";
 
+      // Create peer with STUN-only for fastest signaling registration.
+      // TURN servers are injected before any data connections are made.
       const peer = new Peer(myId, {
         ...PEER_CONFIG,
-        config: { iceServers },
+        config: { iceServers: STUN_SERVERS },
       });
       peerRef.current = peer;
 
@@ -235,15 +226,7 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
               retryCount++;
               console.log(`Connection attempt ${retryCount} failed, retrying...`);
               hostConn.close();
-
-              // On first retry, if TURN servers arrived, recreate peer with TURN
-              if (retryCount === 1 && cachedIceServers && cachedIceServers.length > STUN_SERVERS.length) {
-                console.log("Retrying with TURN servers...");
-                peer.destroy();
-                init(cachedIceServers);
-              } else {
-                connectToHost();
-              }
+              connectToHost();
             } else {
               setError("Connection timed out. Check your PIN and try again.");
               peer.destroy();
@@ -252,8 +235,27 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         }, GUEST_CONNECT_TIMEOUT_MS);
       }
 
-      peer.on("open", () => {
+      peer.on("open", async () => {
         setIsDisconnected(false);
+
+        // Inject TURN servers into peer config (fetched in parallel with Peer creation).
+        // This ensures all new RTCPeerConnections (both outgoing and incoming) use TURN.
+        try {
+          const servers = await Promise.race([
+            turnPromise,
+            new Promise<RTCIceServer[]>((resolve) =>
+              setTimeout(() => resolve(STUN_SERVERS), TURN_WAIT_AFTER_OPEN_MS)
+            ),
+          ]);
+          if (!destroyed && !peer.destroyed) {
+            (peer as any).options.config = { iceServers: servers };
+          }
+        } catch {
+          // Proceed with STUN-only
+        }
+
+        if (destroyed || peer.destroyed) return;
+
         if (isHost) {
           setIsConnected(true);
           setUserId("User 1");
