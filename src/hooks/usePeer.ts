@@ -3,8 +3,8 @@ import Peer, { DataConnection } from "peerjs";
 import { PEER_CONFIG, STUN_SERVERS, fetchIceServers, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
 import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
 
-const GUEST_CONNECT_TIMEOUT_MS = 25_000;
-const MAX_CONNECT_RETRIES = 2;
+const GUEST_CONNECT_TIMEOUT_MS = 10_000;
+const MAX_CONNECT_RETRIES = 3;
 
 interface UsePeerOptions {
   pin: string;
