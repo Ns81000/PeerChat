@@ -11,11 +11,30 @@ export const STUN_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun1.l.google.com:19302" },
 ];
 
+/** Free public TURN servers as ultimate fallback (metered.ca open relay) */
+const PUBLIC_TURN_FALLBACK: RTCIceServer[] = [
+  {
+    urls: "turn:a.relay.metered.ca:80",
+    username: "e8dd65b92f4981b9aebf2db4",
+    credential: "xlEB/cKJfrRWMJYP",
+  },
+  {
+    urls: "turn:a.relay.metered.ca:443",
+    username: "e8dd65b92f4981b9aebf2db4",
+    credential: "xlEB/cKJfrRWMJYP",
+  },
+  {
+    urls: "turn:a.relay.metered.ca:443?transport=tcp",
+    username: "e8dd65b92f4981b9aebf2db4",
+    credential: "xlEB/cKJfrRWMJYP",
+  },
+];
+
 /**
  * Fetches dynamic TURN credentials from the Vercel API route (/api/turn).
- * Falls back to STUN-only if the API is unavailable (e.g. local dev).
+ * Falls back to public TURN servers if the API is unavailable.
  */
-const TURN_FETCH_TIMEOUT_MS = 3_000;
+const TURN_FETCH_TIMEOUT_MS = 4_000;
 
 export async function fetchIceServers(): Promise<RTCIceServer[]> {
   try {
@@ -23,13 +42,21 @@ export async function fetchIceServers(): Promise<RTCIceServer[]> {
     const timeoutId = setTimeout(() => controller.abort(), TURN_FETCH_TIMEOUT_MS);
     const res = await fetch("/api/turn", { signal: controller.signal });
     clearTimeout(timeoutId);
-    if (!res.ok) return STUN_SERVERS;
+    if (!res.ok) return [...STUN_SERVERS, ...PUBLIC_TURN_FALLBACK];
     const servers: RTCIceServer[] = await res.json();
-    // Merge: always include our own STUN servers + whatever TURN the API returns
+    // Check if the API returned actual TURN servers (not just STUN fallback)
+    const hasTurn = servers.some((s) => {
+      const urls = typeof s.urls === "string" ? [s.urls] : s.urls;
+      return urls.some((u) => u.startsWith("turn:"));
+    });
+    if (!hasTurn) {
+      // API returned STUN-only fallback (env vars not set) — add public TURN
+      return [...STUN_SERVERS, ...PUBLIC_TURN_FALLBACK];
+    }
     return [...STUN_SERVERS, ...servers];
   } catch {
-    // Timeout, local dev, or network error — STUN only (works on same network)
-    return STUN_SERVERS;
+    // Timeout, local dev, or network error — use public TURN fallback
+    return [...STUN_SERVERS, ...PUBLIC_TURN_FALLBACK];
   }
 }
 

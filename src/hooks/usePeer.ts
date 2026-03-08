@@ -3,9 +3,8 @@ import Peer, { DataConnection } from "peerjs";
 import { PEER_CONFIG, STUN_SERVERS, fetchIceServers, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
 import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
 
-const GUEST_CONNECT_TIMEOUT_MS = 8_000;
-const MAX_CONNECT_RETRIES = 3;
-const TURN_WAIT_AFTER_OPEN_MS = 1_500;
+const GUEST_CONNECT_TIMEOUT_MS = 12_000;
+const MAX_CONNECT_RETRIES = 2;
 
 interface UsePeerOptions {
   pin: string;
@@ -79,8 +78,10 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // Kick off TURN fetch immediately — runs in parallel with Peer signaling registration
+    // Fetch ICE servers (includes TURN) — runs in parallel with Peer signaling registration
     const turnPromise = fetchIceServers().catch(() => STUN_SERVERS);
+    let resolvedIceServers: RTCIceServer[] | null = null;
+    turnPromise.then((s) => { resolvedIceServers = s; });
 
     function init() {
       if (destroyed) return;
@@ -88,8 +89,8 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       const myId = isHost ? hostPeerId(pin) : guestPeerId(pin);
       const myLabel = isHost ? "User 1" : "";
 
-      // Create peer with STUN-only for fastest signaling registration.
-      // TURN servers are injected before any data connections are made.
+      // Start with STUN for fast signaling registration.
+      // Full ICE config (with TURN) is injected in peer.on("open") before any data connections.
       const peer = new Peer(myId, {
         ...PEER_CONFIG,
         config: { iceServers: STUN_SERVERS },
@@ -196,27 +197,32 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         const checkIce = () => {
           const pc = (conn as any).peerConnection as RTCPeerConnection | undefined;
           if (!pc) return;
-          const handler = () => {
+          pc.addEventListener("iceconnectionstatechange", () => {
             const state = pc.iceConnectionState;
-            console.log(`ICE state [${conn.peer}]: ${state}`);
-
             if (state === "failed") {
               console.warn(`ICE failed for ${conn.peer}, closing connection`);
               conn.close();
-            } else if (state === "disconnected") {
-              // Transient state — common when phone is locked or tab backgrounded.
-              // ICE will recover automatically or transition to "failed" if truly lost.
-              console.log(`ICE disconnected for ${conn.peer}, waiting for recovery...`);
-            } else if (state === "connected" || state === "completed") {
-              console.log(`ICE connected for ${conn.peer}`);
             }
-          };
-          pc.addEventListener("iceconnectionstatechange", handler);
+          });
         };
-        setTimeout(checkIce, 1000);
+        setTimeout(checkIce, 500);
       }
 
-      function connectToHost() {
+      function connectToHost(forceRelay = false) {
+        // If retrying, force relay-only transport to avoid unstable STUN cycling
+        if (forceRelay && resolvedIceServers) {
+          const turnOnly = resolvedIceServers.filter((s) => {
+            const urls = typeof s.urls === "string" ? [s.urls] : s.urls;
+            return urls.some((u) => u.startsWith("turn:"));
+          });
+          if (turnOnly.length > 0) {
+            (peer as any).options.config = {
+              iceServers: turnOnly,
+              iceTransportPolicy: "relay",
+            };
+          }
+        }
+
         const hostConn = peer.connect(hostPeerId(pin), { reliable: true });
         setupConnection(hostConn);
 
@@ -224,9 +230,9 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
           if (!connectionsRef.current.has(hostPeerId(pin))) {
             if (retryCount < MAX_CONNECT_RETRIES) {
               retryCount++;
-              console.log(`Connection attempt ${retryCount} failed, retrying...`);
+              console.log(`Connection attempt ${retryCount} failed, retrying with relay...`);
               hostConn.close();
-              connectToHost();
+              connectToHost(true);
             } else {
               setError("Connection timed out. Check your PIN and try again.");
               peer.destroy();
@@ -238,16 +244,13 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
       peer.on("open", async () => {
         setIsDisconnected(false);
 
-        // Inject TURN servers into peer config (fetched in parallel with Peer creation).
-        // This ensures all new RTCPeerConnections (both outgoing and incoming) use TURN.
+        // Always wait for TURN servers before making any data connections.
+        // The fetch started in parallel with Peer creation, so most of the
+        // wait is already elapsed. This is critical for mobile/restrictive NATs.
         try {
-          const servers = await Promise.race([
-            turnPromise,
-            new Promise<RTCIceServer[]>((resolve) =>
-              setTimeout(() => resolve(STUN_SERVERS), TURN_WAIT_AFTER_OPEN_MS)
-            ),
-          ]);
+          const servers = await turnPromise;
           if (!destroyed && !peer.destroyed) {
+            resolvedIceServers = servers;
             (peer as any).options.config = { iceServers: servers };
           }
         } catch {
