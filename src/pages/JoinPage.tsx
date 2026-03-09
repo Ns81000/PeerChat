@@ -1,4 +1,4 @@
-import { useState, useRef, KeyboardEvent, ClipboardEvent } from "react";
+import { useState, useRef, useEffect, KeyboardEvent, ClipboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
@@ -8,6 +8,9 @@ const JoinPage = () => {
   const navigate = useNavigate();
   const [digits, setDigits] = useState<string[]>(Array(PIN_LENGTH).fill(""));
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Prefetch ChatPage chunk as soon as JoinPage mounts — user will navigate there next
+  useEffect(() => { import("./ChatPage"); }, []);
 
   const handleChange = (index: number, value: string) => {
     if (!/^\d?$/.test(value)) return;

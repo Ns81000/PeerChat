@@ -1,19 +1,23 @@
+import { useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { generatePin } from "@/lib/generatePin";
 import { Shield, Zap, Ghost } from "lucide-react";
 
+/** Prefetch the ChatPage chunk so it's cached before navigation */
+const prefetchChat = () => { import("./ChatPage"); };
+
 const LandingPage = () => {
   const navigate = useNavigate();
 
-  const handleStart = () => {
+  const handleStart = useCallback(() => {
     const pin = generatePin();
     navigate(`/chat/${pin}?host=true`);
-  };
+  }, [navigate]);
 
-  const handleJoin = () => {
+  const handleJoin = useCallback(() => {
     navigate("/join");
-  };
+  }, [navigate]);
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4">
@@ -28,7 +32,7 @@ const LandingPage = () => {
         </div>
 
         <div className="flex gap-4">
-          <Button variant="hero" onClick={handleStart}>
+          <Button variant="hero" onClick={handleStart} onMouseEnter={prefetchChat} onFocus={prefetchChat}>
             Start
           </Button>
           <Button variant="hero-ghost" onClick={handleJoin}>

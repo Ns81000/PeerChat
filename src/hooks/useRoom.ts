@@ -296,10 +296,11 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
           setIsConnected(true);
           const state = ch.presenceState();
           setUserCount(Object.keys(state).length);
-          // Grace period already covers false leaves — use minimal sync delay
-          setTimeout(() => {
+          // Enable leave detection on next microtask — the 8s grace period
+          // already prevents false "user left" messages from mobile suspensions
+          queueMicrotask(() => {
             if (!cancelled) initialSyncDoneRef.current = true;
-          }, 200);
+          });
         }
       } catch (err) {
         if (!cancelled) {
