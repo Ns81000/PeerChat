@@ -72,6 +72,10 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
     let destroyed = false;
     let guestTimeoutId: ReturnType<typeof setTimeout> | null = null;
     let retryCount = 0;
+    // Prevents connectToHost() from being called a second time when the
+    // signaling WebSocket drops and auto-reconnects before the DataConnection
+    // has opened (common on mobile networks).
+    let connectToHostCalled = false;
 
     // Reconnect signaling server when tab becomes visible after being backgrounded
     const handleVisibilityChange = () => {
@@ -282,7 +286,11 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
             // Proceed with STUN-only if the fetch itself threw
           }
           if (destroyed || peer.destroyed) return;
-          connectToHost();
+          // Guard: only attempt if no connection exists and no attempt is in progress
+          if (!connectToHostCalled && !connectionsRef.current.has(hostPeerId(pin))) {
+            connectToHostCalled = true;
+            connectToHost();
+          }
         }
       });
 

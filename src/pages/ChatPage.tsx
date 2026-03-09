@@ -68,10 +68,13 @@ const ChatPage = () => {
   }, [fileError]);
 
   useEffect(() => {
-    if (isDisconnected) {
+    // Only warn about signaling drops once the user is already in the chat room.
+    // During initial connection this fires before the DataConnection is open
+    // and just confuses the user — the reconnect is automatic and silent.
+    if (isDisconnected && isConnected) {
       toast.warning("Signaling server disconnected. Existing connections still work.");
     }
-  }, [isDisconnected]);
+  }, [isDisconnected, isConnected]);
 
   useEffect(() => {
     return () => {
