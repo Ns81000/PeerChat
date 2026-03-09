@@ -3,7 +3,7 @@ import Peer, { DataConnection } from "peerjs";
 import { PEER_CONFIG, STUN_SERVERS, fetchIceServers, hostPeerId, guestPeerId, MAX_USERS } from "@/lib/peerConfig";
 import type { PeerData, PeerList, HelloMessage, SystemMessage } from "@/lib/messageSchema";
 
-const GUEST_CONNECT_TIMEOUT_MS = 12_000;
+const GUEST_CONNECT_TIMEOUT_MS = 8_000;
 const MAX_CONNECT_RETRIES = 2;
 
 interface UsePeerOptions {
@@ -249,30 +249,39 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         }, GUEST_CONNECT_TIMEOUT_MS);
       }
 
-      peer.on("open", () => {
+      peer.on("open", async () => {
         setIsDisconnected(false);
 
-        // Inject TURN servers as soon as the fetch resolves (already running in parallel
-        // with Peer creation — no extra latency). We do NOT await here so that:
-        //  • The host room becomes visible instantly (no TURN wait needed to accept guests)
-        //  • The guest starts dialing the host immediately; TURN will be ready well before
-        //    ICE candidate gathering finishes (~300 ms) since the fetch max is 4 s but
-        //    typically completes in <500 ms from the Vercel edge.
-        turnPromise
-          .then((servers) => {
+        if (isHost) {
+          // Host only needs to be visible on the signaling server — no outbound
+          // ICE needed yet. Show the room instantly and inject TURN in background
+          // so it is ready before the first guest DataConnection opens.
+          turnPromise
+            .then((servers) => {
+              if (!destroyed && !peer.destroyed) {
+                resolvedIceServers = servers;
+                (peer as any).options.config = { iceServers: servers };
+              }
+            })
+            .catch(() => {});
+
+          setIsConnected(true);
+          setUserId("User 1");
+        } else {
+          // Guest MUST have TURN ready before dialing — critical for mobile /
+          // carrier-grade NAT where STUN hole-punching always fails.
+          // turnPromise started before new Peer(), so the extra wait here is
+          // near-zero on fast connections and at most 4 s on very slow ones.
+          try {
+            const servers = await turnPromise;
             if (!destroyed && !peer.destroyed) {
               resolvedIceServers = servers;
               (peer as any).options.config = { iceServers: servers };
             }
-          })
-          .catch(() => {});
-
-        if (destroyed || peer.destroyed) return;
-
-        if (isHost) {
-          setIsConnected(true);
-          setUserId("User 1");
-        } else {
+          } catch {
+            // Proceed with STUN-only if the fetch itself threw
+          }
+          if (destroyed || peer.destroyed) return;
           connectToHost();
         }
       });

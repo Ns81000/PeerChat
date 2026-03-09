@@ -53,7 +53,11 @@ export async function fetchIceServers(): Promise<RTCIceServer[]> {
       // API returned STUN-only fallback (env vars not set) — add public TURN
       return [...STUN_SERVERS, ...PUBLIC_TURN_FALLBACK];
     }
-    return [...STUN_SERVERS, ...servers];
+    // Always append public TURN alongside private credentials.
+    // Private TURN (ExpressTurn) uses port 3478 UDP which is blocked on many
+    // mobile carrier networks. Public fallback runs on ports 80 & 443 (TCP/UDP)
+    // which pass through virtually every firewall, guaranteeing a working relay.
+    return [...STUN_SERVERS, ...servers, ...PUBLIC_TURN_FALLBACK];
   } catch {
     // Timeout, local dev, or network error — use public TURN fallback
     return [...STUN_SERVERS, ...PUBLIC_TURN_FALLBACK];
