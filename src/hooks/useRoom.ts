@@ -18,6 +18,7 @@ interface UseRoomReturn {
   userLabel: string;
   roomId: string | null;
   channel: RealtimeChannel | null;
+  hostLeft: boolean;
   disconnect: () => Promise<void>;
 }
 
@@ -28,9 +29,12 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
   const [userId] = useState(() => crypto.randomUUID().slice(0, 8));
   const [userLabel, setUserLabel] = useState("");
   const [roomId, setRoomId] = useState<string | null>(null);
+  const [hostLeft, setHostLeft] = useState(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const roomIdRef = useRef<string | null>(null);
+  const userLabelRef = useRef("");
   const presenceTrackedRef = useRef(false);
+  const initialSyncDoneRef = useRef(false);
   const disconnectedRef = useRef(false);
 
   const disconnect = useCallback(async () => {
@@ -38,12 +42,20 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
     disconnectedRef.current = true;
 
     const ch = channelRef.current;
+    const rid = roomIdRef.current;
+
+    // Host: broadcast host-left so other clients navigate away immediately
+    if (isHost && ch) {
+      await ch.send({ type: "broadcast", event: "host-left", payload: {} });
+      // Brief delay to let the broadcast propagate before tearing down
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
     if (ch) {
       channelRef.current = null;
       supabase.removeChannel(ch);
     }
 
-    const rid = roomIdRef.current;
     if (!rid) return;
 
     await supabase.from("members").delete().eq("room_id", rid).eq("user_id", userId);
@@ -119,7 +131,18 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
           }
 
           setUserLabel(label);
+          userLabelRef.current = label;
           setUserCount(1);
+
+          // System message: host joined
+          await supabase.from("messages").insert({
+            id: crypto.randomUUID(),
+            room_id: room.id,
+            sender_id: "system",
+            sender_label: "System",
+            type: "system",
+            content: `${label} joined the room`,
+          });
         } else {
           const { data: room } = await supabase
             .from("rooms")
@@ -171,7 +194,18 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
           }
 
           setUserLabel(label);
+          userLabelRef.current = label;
           setUserCount(currentCount + 1);
+
+          // System message: user joined
+          await supabase.from("messages").insert({
+            id: crypto.randomUUID(),
+            room_id: room.id,
+            sender_id: "system",
+            sender_label: "System",
+            type: "system",
+            content: `${label} joined the room`,
+          });
         }
 
         if (cancelled) return;
@@ -190,15 +224,62 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
               const count = Object.keys(state).length;
               setUserCount(count);
             })
+            .on("presence", { event: "leave" }, ({ leftPresences }) => {
+              if (!initialSyncDoneRef.current || cancelled) return;
+
+              for (const p of leftPresences) {
+                const data = p as { user_id?: string; label?: string; is_host?: boolean };
+
+                // If the host left abruptly, all clients should leave
+                if (data.is_host && !isHost) {
+                  setHostLeft(true);
+                  return;
+                }
+
+                // Host inserts "user left" system messages for other users
+                if (
+                  isHost &&
+                  data.label &&
+                  !data.is_host &&
+                  roomIdRef.current &&
+                  !disconnectedRef.current
+                ) {
+                  supabase
+                    .from("messages")
+                    .insert({
+                      id: crypto.randomUUID(),
+                      room_id: roomIdRef.current,
+                      sender_id: "system",
+                      sender_label: "System",
+                      type: "system",
+                      content: `${data.label} left the room`,
+                    })
+                    .then();
+                }
+              }
+            })
+            .on("broadcast", { event: "host-left" }, () => {
+              if (!isHost) {
+                setHostLeft(true);
+              }
+            })
             .subscribe(async (status) => {
               if (cancelled) return;
 
               if (status === "SUBSCRIBED") {
-                await channel.track({ user_id: userId });
+                await channel.track({
+                  user_id: userId,
+                  label: userLabelRef.current,
+                  is_host: isHost,
+                });
                 presenceTrackedRef.current = true;
                 setIsConnected(true);
                 const state = channel.presenceState();
                 setUserCount(Object.keys(state).length);
+                // Wait for initial presence sync to settle before processing leave events
+                setTimeout(() => {
+                  if (!cancelled) initialSyncDoneRef.current = true;
+                }, 1000);
               } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
                 // Tear down the failed channel before retrying
                 supabase.removeChannel(channel);
@@ -230,6 +311,7 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
     return () => {
       cancelled = true;
       presenceTrackedRef.current = false;
+      initialSyncDoneRef.current = false;
 
       const ch = channelRef.current;
       if (ch) {
@@ -271,6 +353,7 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
     userLabel,
     roomId,
     channel: channelRef.current,
+    hostLeft,
     disconnect,
   };
 }

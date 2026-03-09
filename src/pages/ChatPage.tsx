@@ -25,7 +25,7 @@ const ChatPage = () => {
   const isHost = searchParams.get("host") === "true";
   const [showLeaveDialog, setShowLeaveDialog] = useState(false);
 
-  const { isConnected, error, userCount, userId, userLabel, roomId, disconnect } = useRoom({
+  const { isConnected, error, userCount, userId, userLabel, roomId, hostLeft, disconnect } = useRoom({
     pin: pin || "",
     isHost,
   });
@@ -56,6 +56,14 @@ const ChatPage = () => {
       cleanup();
     };
   }, [cleanup]);
+
+  useEffect(() => {
+    if (hostLeft) {
+      disconnect();
+      toast.info("The host has left. Room is closing.");
+      navigate("/");
+    }
+  }, [hostLeft, disconnect, navigate]);
 
   const handleLeave = () => {
     setShowLeaveDialog(true);
@@ -128,7 +136,7 @@ const ChatPage = () => {
         </div>
       )}
 
-      <ChatWindow messages={messages} currentUserId="self" />
+      <ChatWindow messages={messages} currentUserId="self" userCount={userCount} />
       <MessageInput
         onSendMessage={sendMessage}
         onSendFile={sendFile}
