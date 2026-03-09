@@ -93,256 +93,214 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
     let cancelled = false;
     disconnectedRef.current = false;
 
-    async function init() {
-      try {
-        if (isHost) {
-          const { data: existing } = await supabase
-            .from("rooms")
-            .select("id")
-            .eq("pin", pin)
-            .maybeSingle();
+    // --- Channel setup (run in parallel with DB ops) ---
+    let retries = 0;
+    /** Resolves once the channel reaches SUBSCRIBED state */
+    let resolveChannelReady: () => void;
+    let rejectChannelReady: (err: Error) => void;
+    const channelReady = new Promise<void>((res, rej) => {
+      resolveChannelReady = res;
+      rejectChannelReady = rej;
+    });
 
-          if (existing) {
-            if (!cancelled) setError("A room with this PIN already exists.");
-            return;
+    function subscribeChannel() {
+      const channel = supabase.channel(`room:${pin}`, {
+        config: { broadcast: { self: false } },
+      });
+
+      channel
+        .on("presence", { event: "sync" }, () => {
+          if (!presenceTrackedRef.current) return;
+          const state = channel.presenceState();
+          const count = Object.keys(state).length;
+          setUserCount(count);
+        })
+        .on("presence", { event: "join" }, ({ newPresences }) => {
+          for (const p of newPresences) {
+            const data = p as { user_id?: string };
+            if (data.user_id && leaveTimersRef.current.has(data.user_id)) {
+              clearTimeout(leaveTimersRef.current.get(data.user_id));
+              leaveTimersRef.current.delete(data.user_id);
+            }
           }
+        })
+        .on("presence", { event: "leave" }, ({ leftPresences }) => {
+          if (!initialSyncDoneRef.current || cancelled) return;
 
-          const { data: room, error: roomErr } = await supabase
-            .from("rooms")
-            .insert({ pin, host_id: userId })
-            .select("id")
-            .single();
+          for (const p of leftPresences) {
+            const data = p as { user_id?: string; label?: string; is_host?: boolean };
 
-          if (roomErr || !room) {
-            if (!cancelled) setError("Failed to create room.");
-            return;
+            if (data.is_host && !isHost) {
+              setHostLeft(true);
+              return;
+            }
+
+            if (
+              isHost &&
+              data.label &&
+              data.user_id &&
+              !data.is_host &&
+              roomIdRef.current &&
+              !disconnectedRef.current
+            ) {
+              const uid = data.user_id;
+              const label = data.label;
+
+              if (leaveTimersRef.current.has(uid)) {
+                clearTimeout(leaveTimersRef.current.get(uid));
+              }
+
+              const timer = setTimeout(() => {
+                leaveTimersRef.current.delete(uid);
+                if (cancelled || disconnectedRef.current || !roomIdRef.current) return;
+
+                const ch = channelRef.current;
+                if (ch) {
+                  const state = ch.presenceState();
+                  const stillPresent = Object.values(state)
+                    .flat()
+                    .some((entry: any) => entry.user_id === uid);
+                  if (stillPresent) return;
+                }
+
+                supabase
+                  .from("messages")
+                  .insert({
+                    id: crypto.randomUUID(),
+                    room_id: roomIdRef.current!,
+                    sender_id: "system",
+                    sender_label: "System",
+                    type: "system",
+                    content: `${label} left the room`,
+                  })
+                  .then();
+              }, LEAVE_GRACE_MS);
+
+              leaveTimersRef.current.set(uid, timer);
+            }
           }
-
-          if (cancelled) {
-            await supabase.from("rooms").delete().eq("id", room.id);
-            return;
+        })
+        .on("broadcast", { event: "host-left" }, () => {
+          if (!isHost) {
+            setHostLeft(true);
           }
-
-          roomIdRef.current = room.id;
-          setRoomId(room.id);
-
-          const label = "User 1";
-          const { error: memberErr } = await supabase.from("members").insert({
-            room_id: room.id,
-            user_id: userId,
-            user_label: label,
-          });
-          if (memberErr) {
-            if (!cancelled) setError("Failed to join room.");
-            return;
-          }
-
-          setUserLabel(label);
-          userLabelRef.current = label;
-          setUserCount(1);
-
-          // System message: host joined
-          await supabase.from("messages").insert({
-            id: crypto.randomUUID(),
-            room_id: room.id,
-            sender_id: "system",
-            sender_label: "System",
-            type: "system",
-            content: `${label} joined the room`,
-          });
-        } else {
-          const { data: room } = await supabase
-            .from("rooms")
-            .select("id")
-            .eq("pin", pin)
-            .maybeSingle();
-
-          if (!room) {
-            if (!cancelled) setError("Room not found. Check your PIN and try again.");
-            return;
-          }
-
+        })
+        .subscribe(async (status) => {
           if (cancelled) return;
-          roomIdRef.current = room.id;
-          setRoomId(room.id);
 
-          const { data: members } = await supabase
-            .from("members")
-            .select("user_id, user_label")
-            .eq("room_id", room.id);
+          if (status === "SUBSCRIBED") {
+            resolveChannelReady();
+          } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
+            supabase.removeChannel(channel);
 
-          const currentCount = members?.length ?? 0;
-          if (currentCount >= MAX_USERS) {
-            if (!cancelled) setError("Room is full. Try again later.");
-            return;
+            if (retries < CHANNEL_MAX_RETRIES) {
+              retries++;
+              setTimeout(() => {
+                if (!cancelled) subscribeChannel();
+              }, CHANNEL_RETRY_DELAY_MS);
+            } else {
+              rejectChannelReady(new Error("Failed to connect to the room channel. Please try again."));
+            }
           }
+        });
 
-          const existingLabels = new Set(members?.map((m) => m.user_label) ?? []);
-          let labelNum = currentCount + 1;
-          let label = `User ${labelNum}`;
-          while (existingLabels.has(label)) {
-            labelNum++;
-            label = `User ${labelNum}`;
-          }
+      channelRef.current = channel;
+    }
 
-          const { error: memberErr } = await supabase.from("members").insert({
-            room_id: room.id,
-            user_id: userId,
-            user_label: label,
+    // Start channel subscription immediately — don't wait for DB
+    subscribeChannel();
+
+    // --- DB ops (run in parallel with channel setup) ---
+    async function initRoom() {
+      try {
+        let rid: string;
+        let label: string;
+        let count: number;
+
+        if (isHost) {
+          const { data, error: rpcErr } = await supabase.rpc("create_room", {
+            p_pin: pin,
+            p_host_id: userId,
+            p_user_label: "User 1",
           });
-          if (memberErr) {
-            if (!cancelled) setError("Failed to join room.");
+
+          if (rpcErr) {
+            if (cancelled) return;
+            if (rpcErr.message.includes("PIN_EXISTS")) {
+              setError("A room with this PIN already exists.");
+            } else {
+              setError("Failed to create room.");
+            }
             return;
           }
 
-          if (cancelled) {
-            await supabase.from("members").delete().eq("room_id", room.id).eq("user_id", userId);
-            return;
-          }
-
-          setUserLabel(label);
-          userLabelRef.current = label;
-          setUserCount(currentCount + 1);
-
-          // System message: user joined
-          await supabase.from("messages").insert({
-            id: crypto.randomUUID(),
-            room_id: room.id,
-            sender_id: "system",
-            sender_label: "System",
-            type: "system",
-            content: `${label} joined the room`,
+          const row = data[0];
+          rid = row.room_id;
+          label = row.user_label;
+          count = 1;
+        } else {
+          const { data, error: rpcErr } = await supabase.rpc("join_room", {
+            p_pin: pin,
+            p_user_id: userId,
+            p_max_users: MAX_USERS,
           });
+
+          if (rpcErr) {
+            if (cancelled) return;
+            if (rpcErr.message.includes("ROOM_NOT_FOUND")) {
+              setError("Room not found. Check your PIN and try again.");
+            } else if (rpcErr.message.includes("ROOM_FULL")) {
+              setError("Room is full. Try again later.");
+            } else {
+              setError("Failed to join room.");
+            }
+            return;
+          }
+
+          const row = data[0];
+          rid = row.room_id;
+          label = row.user_label;
+          count = row.member_count;
         }
+
+        if (cancelled) {
+          // Undo: clean up the member (and room if host)
+          await supabase.from("members").delete().eq("room_id", rid).eq("user_id", userId);
+          if (isHost) {
+            await supabase.from("messages").delete().eq("room_id", rid);
+            await supabase.from("members").delete().eq("room_id", rid);
+            await supabase.from("rooms").delete().eq("id", rid);
+          }
+          return;
+        }
+
+        roomIdRef.current = rid;
+        setRoomId(rid);
+        setUserLabel(label);
+        userLabelRef.current = label;
+        setUserCount(count);
+
+        // Wait for the channel that was started in parallel
+        await channelReady;
 
         if (cancelled) return;
 
-        let retries = 0;
-
-        function subscribeChannel() {
-          const channel = supabase.channel(`room:${pin}`, {
-            config: { broadcast: { self: false } },
+        const ch = channelRef.current;
+        if (ch) {
+          await ch.track({
+            user_id: userId,
+            label,
+            is_host: isHost,
           });
-
-          channel
-            .on("presence", { event: "sync" }, () => {
-              if (!presenceTrackedRef.current) return;
-              const state = channel.presenceState();
-              const count = Object.keys(state).length;
-              setUserCount(count);
-            })
-            .on("presence", { event: "join" }, ({ newPresences }) => {
-              // If a user reconnects within the grace period, cancel the pending leave
-              for (const p of newPresences) {
-                const data = p as { user_id?: string };
-                if (data.user_id && leaveTimersRef.current.has(data.user_id)) {
-                  clearTimeout(leaveTimersRef.current.get(data.user_id));
-                  leaveTimersRef.current.delete(data.user_id);
-                }
-              }
-            })
-            .on("presence", { event: "leave" }, ({ leftPresences }) => {
-              if (!initialSyncDoneRef.current || cancelled) return;
-
-              for (const p of leftPresences) {
-                const data = p as { user_id?: string; label?: string; is_host?: boolean };
-
-                // Host leaving is always acted on immediately — no grace period
-                if (data.is_host && !isHost) {
-                  setHostLeft(true);
-                  return;
-                }
-
-                // For regular users, wait LEAVE_GRACE_MS before treating as a real leave
-                // so that brief mobile suspensions don't fire false "user left" messages
-                if (
-                  isHost &&
-                  data.label &&
-                  data.user_id &&
-                  !data.is_host &&
-                  roomIdRef.current &&
-                  !disconnectedRef.current
-                ) {
-                  const uid = data.user_id;
-                  const label = data.label;
-
-                  // Clear any existing timer for this user (e.g. rapid disconnect/reconnect)
-                  if (leaveTimersRef.current.has(uid)) {
-                    clearTimeout(leaveTimersRef.current.get(uid));
-                  }
-
-                  const timer = setTimeout(() => {
-                    leaveTimersRef.current.delete(uid);
-                    if (cancelled || disconnectedRef.current || !roomIdRef.current) return;
-
-                    // Re-check presence: if the user is back, skip
-                    const ch = channelRef.current;
-                    if (ch) {
-                      const state = ch.presenceState();
-                      const stillPresent = Object.values(state)
-                        .flat()
-                        .some((entry: any) => entry.user_id === uid);
-                      if (stillPresent) return;
-                    }
-
-                    supabase
-                      .from("messages")
-                      .insert({
-                        id: crypto.randomUUID(),
-                        room_id: roomIdRef.current!,
-                        sender_id: "system",
-                        sender_label: "System",
-                        type: "system",
-                        content: `${label} left the room`,
-                      })
-                      .then();
-                  }, LEAVE_GRACE_MS);
-
-                  leaveTimersRef.current.set(uid, timer);
-                }
-              }
-            })
-            .on("broadcast", { event: "host-left" }, () => {
-              if (!isHost) {
-                setHostLeft(true);
-              }
-            })
-            .subscribe(async (status) => {
-              if (cancelled) return;
-
-              if (status === "SUBSCRIBED") {
-                await channel.track({
-                  user_id: userId,
-                  label: userLabelRef.current,
-                  is_host: isHost,
-                });
-                presenceTrackedRef.current = true;
-                setIsConnected(true);
-                const state = channel.presenceState();
-                setUserCount(Object.keys(state).length);
-                // Wait for initial presence sync to settle before processing leave events
-                setTimeout(() => {
-                  if (!cancelled) initialSyncDoneRef.current = true;
-                }, 1000);
-              } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
-                // Tear down the failed channel before retrying
-                supabase.removeChannel(channel);
-
-                if (retries < CHANNEL_MAX_RETRIES) {
-                  retries++;
-                  setTimeout(() => {
-                    if (!cancelled) subscribeChannel();
-                  }, CHANNEL_RETRY_DELAY_MS);
-                } else {
-                  setError("Failed to connect to the room channel. Please try again.");
-                }
-              }
-            });
-
-          channelRef.current = channel;
+          presenceTrackedRef.current = true;
+          setIsConnected(true);
+          const state = ch.presenceState();
+          setUserCount(Object.keys(state).length);
+          // Grace period already covers false leaves — use minimal sync delay
+          setTimeout(() => {
+            if (!cancelled) initialSyncDoneRef.current = true;
+          }, 200);
         }
-
-        subscribeChannel();
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Connection error");
@@ -350,7 +308,7 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
       }
     }
 
-    init();
+    initRoom();
 
     return () => {
       cancelled = true;
