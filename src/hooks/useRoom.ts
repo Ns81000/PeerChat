@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase, MAX_USERS } from "@/lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
+const CHANNEL_MAX_RETRIES = 3;
+const CHANNEL_RETRY_DELAY_MS = 2_000;
+
 interface UseRoomOptions {
   pin: string;
   isHost: boolean;
@@ -173,32 +176,48 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
 
         if (cancelled) return;
 
-        const channel = supabase.channel(`room:${pin}`, {
-          config: { broadcast: { self: false } },
-        });
+        let retries = 0;
 
-        channel
-          .on("presence", { event: "sync" }, () => {
-            if (!presenceTrackedRef.current) return;
-            const state = channel.presenceState();
-            const count = Object.keys(state).length;
-            setUserCount(count);
-          })
-          .subscribe(async (status) => {
-            if (cancelled) return;
-
-            if (status === "SUBSCRIBED") {
-              await channel.track({ user_id: userId });
-              presenceTrackedRef.current = true;
-              setIsConnected(true);
-              const state = channel.presenceState();
-              setUserCount(Object.keys(state).length);
-            } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
-              setError("Failed to connect to the room channel. Please try again.");
-            }
+        function subscribeChannel() {
+          const channel = supabase.channel(`room:${pin}`, {
+            config: { broadcast: { self: false } },
           });
 
-        channelRef.current = channel;
+          channel
+            .on("presence", { event: "sync" }, () => {
+              if (!presenceTrackedRef.current) return;
+              const state = channel.presenceState();
+              const count = Object.keys(state).length;
+              setUserCount(count);
+            })
+            .subscribe(async (status) => {
+              if (cancelled) return;
+
+              if (status === "SUBSCRIBED") {
+                await channel.track({ user_id: userId });
+                presenceTrackedRef.current = true;
+                setIsConnected(true);
+                const state = channel.presenceState();
+                setUserCount(Object.keys(state).length);
+              } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
+                // Tear down the failed channel before retrying
+                supabase.removeChannel(channel);
+
+                if (retries < CHANNEL_MAX_RETRIES) {
+                  retries++;
+                  setTimeout(() => {
+                    if (!cancelled) subscribeChannel();
+                  }, CHANNEL_RETRY_DELAY_MS);
+                } else {
+                  setError("Failed to connect to the room channel. Please try again.");
+                }
+              }
+            });
+
+          channelRef.current = channel;
+        }
+
+        subscribeChannel();
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Connection error");

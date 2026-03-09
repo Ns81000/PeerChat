@@ -1,14 +1,40 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ComponentType } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
-const Index = lazy(() => import("./pages/Index"));
-const JoinPage = lazy(() => import("./pages/JoinPage"));
-const ChatPage = lazy(() => import("./pages/ChatPage"));
-const NotFound = lazy(() => import("./pages/NotFound"));
+/**
+ * Wrap React.lazy with automatic retry + full-page reload on chunk load failure.
+ * After a new Vercel deploy the old hashed chunk files no longer exist on the CDN,
+ * so users with a stale index.html will hit a network error when navigating.
+ * One silent reload fetches the new index.html and resolves the problem.
+ */
+function lazyRetry<T extends ComponentType<unknown>>(
+  factory: () => Promise<{ default: T }>,
+) {
+  return lazy(() =>
+    factory().catch(() => {
+      // Prevent infinite reload loops by storing a flag in sessionStorage
+      const key = "chunk-reload";
+      if (!sessionStorage.getItem(key)) {
+        sessionStorage.setItem(key, "1");
+        window.location.reload();
+        // Return a never-resolving promise so React doesn't render a broken module
+        return new Promise<{ default: T }>(() => {});
+      }
+      sessionStorage.removeItem(key);
+      // If we already reloaded once and it still fails, surface the error
+      return Promise.reject(new Error("Failed to load page after retry"));
+    }),
+  );
+}
+
+const Index = lazyRetry(() => import("./pages/Index"));
+const JoinPage = lazyRetry(() => import("./pages/JoinPage"));
+const ChatPage = lazyRetry(() => import("./pages/ChatPage"));
+const NotFound = lazyRetry(() => import("./pages/NotFound"));
 
 const PageLoader = () => (
   <div className="flex min-h-screen items-center justify-center bg-background">
