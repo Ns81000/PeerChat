@@ -26,7 +26,7 @@ function renderTextWithLinks(text: string): ReactNode[] {
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
-  const regex = new RegExp(URL_REGEX);
+  const regex = new RegExp(URL_REGEX.source, "g");
   while ((match = regex.exec(text)) !== null) {
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
@@ -60,7 +60,7 @@ const MessageBubble = ({ message, currentUserId }: MessageBubbleProps) => {
     );
   }
 
-  if (message.type === "file-message") {
+  if (message.type === "file") {
     const fileMsg = message as FileMessage;
     const isOwn = fileMsg.senderId === currentUserId;
     const isImage = fileMsg.mimeType.startsWith("image/");
@@ -76,13 +76,15 @@ const MessageBubble = ({ message, currentUserId }: MessageBubbleProps) => {
             </p>
           )}
           {(isImage || isVideo || isAudio) && (
-            <FilePreview mimeType={fileMsg.mimeType} objectUrl={fileMsg.objectUrl} fileName={fileMsg.fileName} />
+            <FilePreview mimeType={fileMsg.mimeType} objectUrl={fileMsg.url} fileName={fileMsg.fileName} />
           )}
           <div className="mt-2 flex items-center gap-2">
             <span className="text-xs text-muted-foreground">📄 {fileMsg.fileName}</span>
             <span className="text-xs text-system-text">{formatFileSize(fileMsg.fileSize)}</span>
             <a
-              href={fileMsg.objectUrl}
+              href={fileMsg.url}
+              target="_blank"
+              rel="noopener noreferrer"
               download={fileMsg.fileName}
               className="rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
             >

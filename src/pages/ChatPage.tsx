@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams, useNavigate } from "react-router-dom";
-import { usePeer } from "@/hooks/usePeer";
-import { clearGuestSession } from "@/lib/peerConfig";
+import { useRoom } from "@/hooks/useRoom";
 import { useChat } from "@/hooks/useChat";
 import { useFileTransfer } from "@/hooks/useFileTransfer";
 import ChatHeader from "@/components/chat/ChatHeader";
 import ChatWindow from "@/components/chat/ChatWindow";
 import MessageInput from "@/components/chat/MessageInput";
-import type { FileMessage } from "@/lib/messageSchema";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -27,61 +25,37 @@ const ChatPage = () => {
   const isHost = searchParams.get("host") === "true";
   const [showLeaveDialog, setShowLeaveDialog] = useState(false);
 
-  const onDataRef = useRef<(data: any, from: string) => void>(() => {});
-
-  const { isConnected, isDisconnected, error, userCount, userId, send, disconnect } = usePeer({
+  const { isConnected, error, userCount, userId, userLabel, roomId, disconnect } = useRoom({
     pin: pin || "",
     isHost,
-    onData: (data, from) => onDataRef.current(data, from),
   });
 
-  const { messages, fileTransfers, sendMessage, handleIncomingData, cleanup } = useChat({
-    userId,
-    sendToPeers: send,
+  const { messages, sendMessage, addLocalFileMessage, cleanup } = useChat({
+    roomId,
+    userId: userLabel,
   });
-
-  onDataRef.current = handleIncomingData;
 
   const { sendFile, sendProgress, isSending, error: fileError } = useFileTransfer({
-    userId,
-    sendToPeers: send,
-    addLocalFileMessage: (file: File, objectUrl: string) => {
-      const fileMsg: FileMessage = {
-        type: "file-message",
-        id: crypto.randomUUID(),
-        senderId: "self",
-        senderLabel: userId,
-        fileName: file.name,
-        fileSize: file.size,
-        mimeType: file.type,
-        objectUrl,
-        timestamp: Date.now(),
-      };
-      handleIncomingData(fileMsg, "self");
-    },
+    pin: pin || "",
+    roomId,
+    userId: userLabel,
+    addLocalFileMessage,
   });
 
-  useEffect(() => {
-    if (fileError) {
-      toast.error(fileError);
-    }
-  }, [fileError]);
+  const prevFileErrorRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // Only warn about signaling drops once the user is already in the chat room.
-    // During initial connection this fires before the DataConnection is open
-    // and just confuses the user — the reconnect is automatic and silent.
-    if (isDisconnected && isConnected) {
-      toast.warning("Signaling server disconnected. Existing connections still work.");
+    if (fileError && fileError !== prevFileErrorRef.current) {
+      toast.error(fileError);
     }
-  }, [isDisconnected, isConnected]);
+    prevFileErrorRef.current = fileError;
+  }, [fileError]);
 
   useEffect(() => {
     return () => {
       cleanup();
-      disconnect();
     };
-  }, [cleanup, disconnect]);
+  }, [cleanup]);
 
   const handleLeave = () => {
     setShowLeaveDialog(true);
@@ -89,8 +63,6 @@ const ChatPage = () => {
 
   const confirmLeave = () => {
     setShowLeaveDialog(false);
-    // Clear persisted identity so re-joining this room generates a fresh peer ID
-    if (pin && !isHost) clearGuestSession(pin);
     disconnect();
     navigate("/");
   };
@@ -133,37 +105,26 @@ const ChatPage = () => {
         onLeave={handleLeave}
       />
 
-      {/* File transfer progress bars */}
-      {(sendProgress || fileTransfers.size > 0) && (
+      {sendProgress && (
         <div className="border-b border-border bg-surface px-4 py-2 space-y-1.5">
-          {sendProgress && (
-            <div className="mx-auto max-w-2xl">
-              <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                <span className="truncate max-w-[200px]">Sending: {sendProgress.fileName}</span>
-                <span>{Math.round((sendProgress.sent / sendProgress.total) * 100)}%</span>
-              </div>
-              <div className="h-1.5 w-full rounded-full bg-elevated overflow-hidden">
+          <div className="mx-auto max-w-2xl">
+            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+              <span className="truncate max-w-[200px]">Sending: {sendProgress.fileName}</span>
+              <span>
+                {sendProgress.sent === 0 ? "Uploading..." : `${Math.round((sendProgress.sent / sendProgress.total) * 100)}%`}
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-elevated overflow-hidden">
+              {sendProgress.sent === 0 ? (
+                <div className="h-full w-1/3 rounded-full bg-foreground animate-pulse" />
+              ) : (
                 <div
                   className="h-full rounded-full bg-foreground transition-all duration-150"
                   style={{ width: `${(sendProgress.sent / sendProgress.total) * 100}%` }}
                 />
-              </div>
+              )}
             </div>
-          )}
-          {Array.from(fileTransfers.entries()).map(([fileId, progress]) => (
-            <div key={fileId} className="mx-auto max-w-2xl">
-              <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                <span className="truncate max-w-[200px]">Receiving: {progress.fileName}</span>
-                <span>{Math.round((progress.received / progress.totalChunks) * 100)}%</span>
-              </div>
-              <div className="h-1.5 w-full rounded-full bg-elevated overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-foreground/60 transition-all duration-150"
-                  style={{ width: `${(progress.received / progress.totalChunks) * 100}%` }}
-                />
-              </div>
-            </div>
-          ))}
+          </div>
         </div>
       )}
 

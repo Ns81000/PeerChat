@@ -1,21 +1,19 @@
 <div align="center">
 
-<img src="public/favicon.svg" alt="PeerChat Logo" width="120" height="120" />
-
 # PeerChat
 
 **Private. Instant. Gone.**
 
-A zero-storage, peer-to-peer encrypted group chat that runs entirely in your browser.
-No servers store your messages. No accounts. No history. Just ephemeral conversations.
+A real-time ephemeral group chat powered by Supabase Realtime.
+No accounts. No history. Rooms vanish when the host leaves.
 
 [![Built with React](https://img.shields.io/badge/React-18.3-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-5.4-646CFF?logo=vite&logoColor=white)](https://vitejs.dev)
-[![WebRTC](https://img.shields.io/badge/WebRTC-P2P-333333?logo=webrtc&logoColor=white)](https://webrtc.org)
+[![Supabase](https://img.shields.io/badge/Supabase-Realtime-3FCF8E?logo=supabase&logoColor=white)](https://supabase.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Live Demo](#-getting-started) · [Features](#-features) · [Architecture](#-architecture) · [Contributing](#-contributing)
+[Features](#-features) · [Architecture](#-architecture) · [Getting Started](#-getting-started) · [Deployment](#-deployment)
 
 </div>
 
@@ -30,6 +28,7 @@ No servers store your messages. No accounts. No history. Just ephemeral conversa
 - [Getting Started](#-getting-started)
 - [Project Structure](#-project-structure)
 - [How It Works](#-how-it-works)
+- [Environment Variables](#-environment-variables)
 - [Testing](#-testing)
 - [Deployment](#-deployment)
 - [Contributing](#-contributing)
@@ -39,49 +38,47 @@ No servers store your messages. No accounts. No history. Just ephemeral conversa
 
 ## 🔍 Overview
 
-**PeerChat** is a real-time group chat application built on top of **WebRTC** using **PeerJS**. All communication happens directly between browsers—no chat server, no database, no message logs.
-
-When you close the tab, the conversation is gone forever.
+**PeerChat** is a real-time group chat application powered by **Supabase Realtime**, **Supabase Storage**, and **Supabase Postgres**. Messages are delivered instantly via Postgres Realtime subscriptions. Files are stored temporarily in Supabase Storage. When the host leaves, the entire room — messages, members, and files — is cleaned up automatically.
 
 ### Why PeerChat?
 
 | Traditional Chat Apps | PeerChat |
 |---|---|
-| Messages stored on servers | Messages never touch a server |
+| Messages stored permanently | Rooms are ephemeral — deleted on host leave |
 | Accounts required | No signup, no login |
-| Chat history persists indefinitely | Conversations vanish when closed |
-| Centralized infrastructure | Fully peer-to-peer mesh network |
-| Complex backend | Static files only—zero backend |
+| Complex backend infrastructure | Single Supabase project handles everything |
+| Chat history persists indefinitely | Conversations vanish when the room closes |
 
 ---
 
 ## ✨ Features
 
 ### Core
-- **🔒 End-to-End Encrypted** — WebRTC DTLS encryption on every data channel
-- **👥 Group Chat** — Up to 10 users in a single room via full-mesh P2P topology
-- **📎 File Sharing** — Send images, documents, audio, and any file type up to 500 MB
+- **👥 Group Chat** — Up to 10 users per room via Supabase Realtime Presence
+- **📎 File Sharing** — Send images, documents, audio, and any file type up to 25 MB
 - **🔗 PIN-Based Rooms** — 6-digit cryptographically random PINs for room access
-- **💨 Ephemeral** — Zero storage. Nothing persists after the tab closes
+- **💨 Ephemeral** — Host leaving destroys the room, all messages, members, and uploaded files
+- **📜 Message History** — Late joiners see existing messages from the current session
 
 ### User Experience
-- **⚡ Instant Start** — One click to create a room, one PIN to join it
+- **⚡ Instant Start** — One click to create a room, one PIN to join
 - **🎨 Dark Theme** — Clean, minimal dark-only UI built with shadcn/ui
 - **📱 Responsive** — Works on desktop, tablet, and mobile screens
-- **🔔 Toast Notifications** — Real-time feedback for joins, disconnections, and errors
+- **🔔 Toast Notifications** — Real-time feedback for errors and file transfers
 - **🖱️ Drag & Drop** — Drop files directly into the chat to send them
-- **💬 Auto-linking** — URLs in messages are automatically converted to clickable links
-- **🎵 Audio Preview** — Audio files play directly in the chat with inline players
-- **🖼️ Image Preview** — Sent images render as inline previews with graceful error handling
-- **📜 Smart Scroll** — Auto-scrolls to new messages, with a "New messages" button when scrolled up
+- **💬 Auto-linking** — URLs in messages become clickable links automatically
+- **🎵 Media Preview** — Audio, video, and image files render inline in chat
+- **📜 Smart Scroll** — Auto-scrolls to new messages with a "New messages" indicator when scrolled up
 
 ### Reliability
-- **⏱️ Connection Timeout** — 15-second timeout for guests connecting to rooms
+- **🛡️ Channel Error Handling** — Detects `TIMED_OUT` and `CHANNEL_ERROR` with user-facing messages
 - **🚪 Room Full Detection** — Graceful handling when room hits the 10-user limit
-- **🔄 Disconnect Recovery** — Detects signaling server disconnections with user notifications
-- **✅ Chunk Validation** — File transfers validate chunk counts before assembly
+- **🔄 Unique Labels** — Unique user labels even when users join/leave rapidly
+- **🧹 Orphan Cleanup** — Failed file uploads are rolled back from storage
+- **✅ Message Deduplication** — Prevents duplicate messages via ID tracking
 - **🛡️ Error Boundary** — Global React error boundary prevents white-screen crashes
-- **📊 Transfer Progress** — Real-time progress bars for both sending and receiving files
+- **📊 Upload Progress** — Indeterminate progress bar during file uploads
+- **🪟 Beforeunload** — Member records cleaned up even on tab close
 
 ---
 
@@ -90,52 +87,57 @@ When you close the tab, the conversation is gone forever.
 | Layer | Technology |
 |-------|------------|
 | **Framework** | React 18 + TypeScript 5.8 |
-| **Build Tool** | Vite 5 |
+| **Build Tool** | Vite 5 (SWC) |
 | **Styling** | Tailwind CSS 3 + shadcn/ui + Radix UI |
-| **P2P Networking** | PeerJS (WebRTC) |
+| **Backend** | Supabase (Postgres + Realtime + Storage) |
 | **Routing** | React Router v6 |
-| **Validation** | Zod |
 | **Testing** | Vitest + Testing Library + jsdom |
 | **Linting** | ESLint 9 + TypeScript ESLint |
+| **Deployment** | Vercel |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Browser A (Host)                   │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐ │
-│  │  React   │──│ useChat  │──│      usePeer          │ │
-│  │   UI     │  │  Hook    │  │  (WebRTC Mesh)        │ │
-│  └──────────┘  └──────────┘  └───────┬───────────────┘ │
-│                                      │ DataChannel     │
-└──────────────────────────────────────┼─────────────────┘
-                                       │
-              ┌────────────────────────┼──────────────────────┐
-              │  PeerJS Signaling      │  (handshake only)    │
-              │  0.peerjs.com          │                      │
-              └────────────────────────┼──────────────────────┘
-                                       │
-┌──────────────────────────────────────┼─────────────────┐
-│                                      │ DataChannel     │
-│  ┌──────────┐  ┌──────────┐  ┌───────┴───────────────┐ │
-│  │  React   │──│ useChat  │──│      usePeer          │ │
-│  │   UI     │  │  Hook    │  │  (WebRTC Mesh)        │ │
-│  └──────────┘  └──────────┘  └───────────────────────┘ │
-│                      Browser B (Guest)                   │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        Browser (User)                        │
+│  ┌──────────┐  ┌──────────┐  ┌────────────────────────────┐ │
+│  │  React   │──│ useRoom  │──│  Supabase Realtime          │ │
+│  │   UI     │  │ useChat  │  │  (Presence + Postgres CDC)  │ │
+│  │          │  │ useFile  │  │                              │ │
+│  └──────────┘  └──────────┘  └──────────┬─────────────────┘ │
+└─────────────────────────────────────────┼───────────────────┘
+                                          │ WebSocket
+┌─────────────────────────────────────────┼───────────────────┐
+│                     Supabase Cloud                           │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │  Postgres   │  │   Realtime   │  │     Storage      │   │
+│  │  (rooms,    │  │  (presence,  │  │   (chat-files    │   │
+│  │  messages,  │  │   postgres   │  │    bucket)       │   │
+│  │  members)   │  │   changes)   │  │                  │   │
+│  └─────────────┘  └──────────────┘  └──────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
-
-### Mesh Topology
-
-Every peer connects to every other peer directly. The **host** acts as the coordination point only during the initial handshake—after that, all peers are equal.
 
 ### Data Flow
 
-1. **Signaling** — PeerJS broker server (`0.peerjs.com`) helps establish WebRTC connections (ICE candidates, SDP offers/answers). No message data flows through this server.
-2. **Data Channels** — Once connected, all messages and files travel directly between browsers over encrypted WebRTC data channels.
-3. **File Transfer** — Files are chunked into 64 KB pieces, sent as binary over data channels, and reassembled on the receiving end.
+1. **Room Creation** — Host inserts a row in `rooms` table with a unique PIN
+2. **Joining** — Guest queries `rooms` by PIN, inserts into `members`
+3. **Presence** — All users track themselves on a Supabase Realtime channel for live user count
+4. **Messaging** — Messages are inserted into `messages` table; all users receive them via Postgres Realtime CDC (Change Data Capture)
+5. **File Transfer** — Files upload to Supabase Storage, then a `file` message record is created
+6. **Cleanup** — When host leaves, all room data (messages, members, files, room record) is deleted
+
+### Database Schema
+
+| Table | Columns | Purpose |
+|-------|---------|---------|
+| `rooms` | `id`, `pin` (unique), `host_id`, `created_at` | Room registry |
+| `messages` | `id`, `room_id`, `sender_id`, `sender_label`, `type`, `content`, `file_*`, `storage_path`, `created_at` | Chat messages |
+| `members` | `id`, `room_id`, `user_id`, `user_label`, `joined_at` | Active room members |
+
+**Storage:** `chat-files` bucket (public, 25 MB file size limit)
 
 ---
 
@@ -143,34 +145,98 @@ Every peer connects to every other peer directly. The **host** acts as the coord
 
 ### Prerequisites
 
-- **Node.js** ≥ 18
-- **pnpm** (recommended) — `npm install -g pnpm`
+- **Node.js** >= 18
+- **pnpm** — `npm install -g pnpm`
+- A **Supabase** project ([free tier](https://supabase.com) works)
+
+### Supabase Setup
+
+1. Create a new project at [supabase.com](https://supabase.com)
+2. Run the following SQL in the **SQL Editor** to create tables:
+
+```sql
+-- Rooms table
+CREATE TABLE public.rooms (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  pin TEXT UNIQUE NOT NULL,
+  host_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Messages table
+CREATE TABLE public.messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  room_id UUID NOT NULL REFERENCES public.rooms(id),
+  sender_id TEXT NOT NULL,
+  sender_label TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'message'
+    CHECK (type IN ('message', 'system', 'file')),
+  content TEXT,
+  file_name TEXT,
+  file_size BIGINT,
+  mime_type TEXT,
+  storage_path TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Members table
+CREATE TABLE public.members (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  room_id UUID NOT NULL REFERENCES public.rooms(id),
+  user_id TEXT NOT NULL,
+  user_label TEXT NOT NULL,
+  joined_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Enable Row Level Security
+ALTER TABLE public.rooms ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.members ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies (allow all for anon — rooms are ephemeral)
+CREATE POLICY "Allow all on rooms" ON public.rooms
+  FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on messages" ON public.messages
+  FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on members" ON public.members
+  FOR ALL USING (true) WITH CHECK (true);
+
+-- Enable Realtime for messages and members
+ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.members;
+```
+
+3. Create a **Storage bucket** named `chat-files`:
+   - Public access: **enabled**
+   - File size limit: **25 MB** (26214400 bytes)
+   - Add storage policies to allow uploads/downloads for anon users
 
 ### Installation
 
 ```bash
 # Clone the repository
 git clone https://github.com/Ns81000/PeerChat.git
-
-# Navigate into the project
 cd PeerChat
 
 # Install dependencies
 pnpm install
 
+# Copy environment template and add your Supabase credentials
+cp .env.example .env.local
+
 # Start the development server
 pnpm dev
 ```
 
-The app will be available at **http://localhost:5173**
+The app will be available at **http://localhost:8080**
 
 ### Quick Start
 
-1. Open the app and click **"Start Chat"** — this creates a room and generates a 6-digit PIN
+1. Open the app and click **"Start"** — creates a room with a random 6-digit PIN
 2. Share the PIN with friends
-3. Friends click **"Join Chat"** and enter the PIN
-4. Start chatting! Send messages, share files, and enjoy private conversations
-5. Close the tab when done — everything is gone
+3. Friends click **"Join"** and enter the PIN
+4. Chat in real-time, share files up to 25 MB
+5. When the host leaves, the room and all data are destroyed
 
 ---
 
@@ -182,41 +248,36 @@ src/
 │   ├── ErrorBoundary.tsx          # Global error boundary
 │   ├── NavLink.tsx                # Navigation link component
 │   ├── chat/
-│   │   ├── ChatHeader.tsx         # Room PIN display, user count, leave button
+│   │   ├── ChatHeader.tsx         # Room PIN, user count, leave button
 │   │   ├── ChatWindow.tsx         # Message list with smart auto-scroll
-│   │   ├── FilePreview.tsx        # Image/audio preview for file messages
-│   │   ├── MessageBubble.tsx      # Individual message rendering with auto-links
+│   │   ├── FilePreview.tsx        # Inline image/video/audio preview
+│   │   ├── MessageBubble.tsx      # Message rendering with auto-links
 │   │   └── MessageInput.tsx       # Auto-resizing textarea + file picker + drag-drop
-│   └── ui/                        # shadcn/ui primitives (button, dialog, toast, etc.)
+│   └── ui/                        # shadcn/ui primitives
 │
 ├── hooks/
-│   ├── useChat.ts                 # Message state, dedup, file reassembly, progress tracking
-│   ├── useFileTransfer.ts         # File chunking, size validation, send progress
-│   ├── usePeer.ts                 # WebRTC mesh networking, connection management
+│   ├── useRoom.ts                 # Room creation/joining, presence, cleanup
+│   ├── useChat.ts                 # Messages, dedup, realtime, history loading
+│   ├── useFileTransfer.ts         # File upload to Storage + message record
 │   ├── use-mobile.tsx             # Responsive breakpoint hook
 │   └── use-toast.ts               # Toast notification state
 │
 ├── lib/
+│   ├── supabase.ts                # Supabase client + constants
 │   ├── generatePin.ts             # Cryptographic 6-digit PIN generation
-│   ├── messageSchema.ts           # Zod schemas for all message types
-│   ├── peerConfig.ts              # PeerJS config, chunk size, room limits
+│   ├── messageSchema.ts           # TypeScript types for message types
 │   └── utils.ts                   # Tailwind class merge utility
 │
 ├── pages/
-│   ├── Index.tsx                   # Landing page — create or join a room
-│   ├── JoinPage.tsx                # PIN entry page with OTP-style input
-│   ├── ChatPage.tsx                # Main chat orchestrator (hooks + UI)
+│   ├── Index.tsx                   # Landing page
+│   ├── JoinPage.tsx                # PIN entry with OTP-style input
+│   ├── ChatPage.tsx                # Main chat orchestrator
 │   └── NotFound.tsx                # 404 page
 │
-├── test/
-│   ├── example.test.ts            # Smoke test
-│   ├── generatePin.test.ts        # PIN generation tests
-│   ├── messageSchema.test.ts      # Zod schema validation tests
-│   ├── peerConfig.test.ts         # Config and peer ID tests
-│   └── useChat.test.ts            # Chat hook unit tests
-│
+├── test/                           # Vitest unit tests
 ├── App.tsx                         # Router + lazy loading + ErrorBoundary
 ├── main.tsx                        # Entry point
+├── vite-env.d.ts                   # Vite + env type declarations
 └── index.css                       # Tailwind base + custom CSS variables
 ```
 
@@ -227,55 +288,68 @@ src/
 ### Room Creation (Host)
 
 ```
-User clicks "Start Chat"
+User clicks "Start"
   → generatePin() creates a crypto-random 6-digit PIN
   → Navigate to /chat/:pin?host=true
-  → usePeer creates a PeerJS peer with ID: pc-{pin}-host
-  → Peer listens for incoming connections
+  → useRoom inserts room into `rooms` table
+  → Host added to `members` as "User 1"
+  → Supabase Realtime Presence channel starts tracking
 ```
 
 ### Joining a Room (Guest)
 
 ```
 User enters PIN on /join page
-  → Navigate to /chat/:pin
-  → usePeer creates a PeerJS peer with ID: pc-{pin}-{random}
-  → Guest connects to pc-{pin}-host
-  → Host broadcasts "User joined" system message
-  → 15-second timeout if connection fails
+  → Navigate to /chat/:pin?host=false
+  → useRoom queries `rooms` by PIN
+  → Checks member count against MAX_USERS (10)
+  → Assigns unique "User N" label
+  → Inserts into `members` table
+  → Subscribes to Presence + Postgres Realtime
+  → Loads existing message history
 ```
 
-### Message Protocol
-
-All messages are validated against Zod schemas. Seven message types:
+### Message Types
 
 | Type | Purpose |
 |------|---------|
-| `message` | Text chat message |
-| `system` | Join/leave notifications |
-| `file-meta` | File transfer metadata (name, size, MIME, chunk count) |
-| `file-chunk` | Binary file chunk (64 KB) |
-| `file-end` | Signals file transfer completion |
-| `file-message` | Assembled file for display |
-| `hello` | Guest introduction to host |
+| `message` | Text chat message from a user |
+| `system` | System notifications |
+| `file` | File shared via Supabase Storage |
 
-### File Transfer Pipeline
+### File Transfer Flow
 
 ```
-Sender                                          Receiver
-  │                                                │
-  ├── file-meta (name, size, mime, totalChunks) ──→│ Store metadata
-  │                                                │ Initialize progress
-  ├── file-chunk[0] (64KB ArrayBuffer) ──────────→│ Store chunk, update %
-  ├── file-chunk[1] ─────────────────────────────→│ Store chunk, update %
-  ├── ...                                          │
-  ├── file-chunk[n] ─────────────────────────────→│ Store chunk, update %
-  │                                                │
-  ├── file-end ──────────────────────────────────→│ Validate chunk count
-  │                                                │ Assemble Blob
-  │                                                │ Create Object URL
-  │                                                │ Display in chat
+Sender                              Supabase
+  │                                    │
+  ├── Upload file to Storage ─────────→│  chat-files/{pin}/{id}.{ext}
+  │                                    │
+  ├── Insert message (type=file) ─────→│  Postgres → Realtime CDC
+  │                                    │
+  │     Receiver                       │
+  │       │←── Realtime INSERT event ──│
+  │       │── Get public URL ─────────→│
+  │       │←── Render in chat ─────────│
 ```
+
+---
+
+## 🔐 Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `VITE_SUPABASE_URL` | Your Supabase project URL | Yes |
+| `VITE_SUPABASE_ANON_KEY` | Your Supabase anonymous/public key | Yes |
+
+Create a `.env.local` file from the template:
+
+```bash
+cp .env.example .env.local
+```
+
+For **Vercel** deployment, add these as **Environment Variables** in your Vercel project settings.
+
+> **Note:** The anon key is safe to expose in client-side code — it only grants access allowed by your RLS policies.
 
 ---
 
@@ -285,87 +359,59 @@ Sender                                          Receiver
 # Run all tests
 pnpm test
 
-# Run tests in watch mode
+# Run in watch mode
 pnpm test:watch
 ```
 
-### Test Coverage
+### Test Suite
 
 | Test File | Tests | What's Tested |
 |-----------|-------|---------------|
 | `generatePin.test.ts` | 3 | PIN format, range, uniqueness |
-| `peerConfig.test.ts` | 4 | Config constants, peer ID generation |
-| `messageSchema.test.ts` | 10 | All 7 message types, Zod union schemas |
-| `useChat.test.ts` | 8 | Send, dedup, system msgs, file progress, assembly, cleanup |
+| `peerConfig.test.ts` | 1 | Supabase config constants |
+| `messageSchema.test.ts` | 4 | Message type shapes and union |
+| `useChat.test.ts` | 4 | Message state, dedup, cleanup, file messages |
 | `example.test.ts` | 1 | Smoke test |
 
-**Total: 26 tests**
+**Total: 13 tests**
 
 ---
 
 ## 🌐 Deployment
 
-PeerChat is a **static site** — no backend needed. Deploy the `dist/` folder to any static host.
+### Vercel (Recommended)
 
-```bash
-# Build for production
-pnpm build
-
-# Preview the production build locally
-pnpm preview
-```
-
-### Deploy to Popular Platforms
-
-<details>
-<summary><strong>Vercel</strong></summary>
-
-1. Push to GitHub
+1. Push your code to GitHub
 2. Import the repo on [vercel.com](https://vercel.com)
-3. Set:
+3. Add **Environment Variables** in Vercel project settings:
+   - `VITE_SUPABASE_URL` = your Supabase project URL
+   - `VITE_SUPABASE_ANON_KEY` = your Supabase anon key
+4. Vercel auto-detects the `vercel.json` configuration:
    - **Build Command:** `pnpm build`
    - **Output Directory:** `dist`
-4. Deploy
+   - **Install Command:** `pnpm install`
+5. Deploy!
 
-</details>
+The included `vercel.json` handles SPA routing with a catch-all rewrite to `index.html`.
+
+### Other Platforms
 
 <details>
 <summary><strong>Netlify</strong></summary>
 
-1. Push to GitHub
-2. Connect the repo on [netlify.com](https://netlify.com)
-3. Set:
-   - **Build Command:** `pnpm build`
-   - **Publish Directory:** `dist`
-4. Add a `_redirects` file in `public/`:
-   ```
-   /*    /index.html   200
-   ```
-5. Deploy
+1. Connect on [netlify.com](https://netlify.com)
+2. Build command: `pnpm build`, publish directory: `dist`
+3. Add environment variables in dashboard
+4. Add `_redirects` in `public/`: `/*  /index.html  200`
 
 </details>
 
 <details>
 <summary><strong>Cloudflare Pages</strong></summary>
 
-1. Push to GitHub
-2. Create a Pages project on [dash.cloudflare.com](https://dash.cloudflare.com)
-3. Set:
-   - **Build Command:** `pnpm build`
-   - **Build Output Directory:** `dist`
-4. Deploy
-
-</details>
-
-<details>
-<summary><strong>GitHub Pages</strong></summary>
-
-1. Install: `pnpm add -D gh-pages`
-2. Add to `package.json`:
-   ```json
-   "scripts": { "deploy": "pnpm build && gh-pages -d dist" }
-   ```
-3. Run: `pnpm deploy`
+1. Create a Pages project on Cloudflare dashboard
+2. Build command: `pnpm build`, output: `dist`
+3. Add environment variables in Pages settings
 
 </details>
 
@@ -373,7 +419,7 @@ pnpm preview
 
 ## 🤝 Contributing
 
-Contributions are welcome! Here's how:
+Contributions are welcome!
 
 1. **Fork** the repository
 2. **Create** a feature branch: `git checkout -b feature/amazing-feature`
@@ -381,11 +427,11 @@ Contributions are welcome! Here's how:
 4. **Push** to the branch: `git push origin feature/amazing-feature`
 5. **Open** a Pull Request
 
-### Development Guidelines
+### Guidelines
 
-- Use **TypeScript** with strict types — no `any` unless absolutely necessary
-- Follow the existing code style and component patterns
-- Write tests for new logic (hooks, utilities)
+- Use **TypeScript** with strict types
+- Follow existing code style and component patterns
+- Write tests for new logic
 - Use **pnpm** as the package manager
 - Run `pnpm lint` before committing
 
@@ -399,6 +445,8 @@ This project is open source and available under the [MIT License](LICENSE).
 
 <div align="center">
 
-**Built with ❤️ using React, WebRTC, and the belief that conversations should be ephemeral.**
+**Built with React, Supabase, and the belief that conversations should be ephemeral.**
 
 [⬆ Back to Top](#peerchat)
+
+</div>

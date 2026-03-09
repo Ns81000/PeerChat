@@ -1,161 +1,183 @@
-import { useCallback, useRef, useState } from "react";
-import type { PeerData, ChatMessage, DisplayMessage, SystemMessage, FileMeta, FileChunk, FileEnd, FileMessage } from "@/lib/messageSchema";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { supabase } from "@/lib/supabase";
+import type { DisplayMessage, ChatMessage, SystemMessage, FileMessage } from "@/lib/messageSchema";
 
 interface UseChatOptions {
+  roomId: string | null;
   userId: string;
-  sendToPeers: (data: PeerData) => void;
 }
 
-interface PendingFile {
-  meta: FileMeta;
-  chunks: ArrayBuffer[];
-  received: number;
-}
-
-export interface FileTransferProgress {
-  fileName: string;
-  totalChunks: number;
-  received: number;
-}
-
-export function useChat({ userId, sendToPeers }: UseChatOptions) {
+export function useChat({ roomId, userId }: UseChatOptions) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
-  const [fileTransfers, setFileTransfers] = useState<Map<string, FileTransferProgress>>(new Map());
   const seenIdsRef = useRef<Set<string>>(new Set());
-  const pendingFilesRef = useRef<Map<string, PendingFile>>(new Map());
-  const objectUrlsRef = useRef<string[]>([]);
+  const MAX_SEEN_IDS = 5000;
 
   const addMessage = useCallback((msg: DisplayMessage) => {
     if (seenIdsRef.current.has(msg.id)) return;
+    if (seenIdsRef.current.size >= MAX_SEEN_IDS) {
+      const iter = seenIdsRef.current.values();
+      const oldest = iter.next().value;
+      if (oldest) seenIdsRef.current.delete(oldest);
+    }
     seenIdsRef.current.add(msg.id);
     setMessages((prev) => [...prev, msg]);
   }, []);
 
+  useEffect(() => {
+    if (!roomId) return;
+
+    let mounted = true;
+
+    async function loadHistory() {
+      const { data: rows } = await supabase
+        .from("messages")
+        .select("*")
+        .eq("room_id", roomId)
+        .order("created_at", { ascending: true });
+
+      if (!mounted || !rows) return;
+
+      for (const row of rows) {
+        if (row.sender_id === "self-" + userId) continue;
+
+        if (row.type === "message") {
+          addMessage({
+            type: "message",
+            id: row.id,
+            senderId: row.sender_id,
+            senderLabel: row.sender_label,
+            content: row.content,
+            timestamp: new Date(row.created_at).getTime(),
+          });
+        } else if (row.type === "system") {
+          addMessage({
+            type: "system",
+            id: row.id,
+            content: row.content,
+            timestamp: new Date(row.created_at).getTime(),
+          });
+        } else if (row.type === "file") {
+          const { data } = supabase.storage.from("chat-files").getPublicUrl(row.storage_path);
+          addMessage({
+            type: "file",
+            id: row.id,
+            senderId: row.sender_id,
+            senderLabel: row.sender_label,
+            fileName: row.file_name,
+            fileSize: row.file_size,
+            mimeType: row.mime_type,
+            url: data.publicUrl,
+            timestamp: new Date(row.created_at).getTime(),
+          });
+        }
+      }
+    }
+
+    loadHistory();
+
+    const sub = supabase
+      .channel(`db-messages-${roomId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => {
+          const row = payload.new as any;
+          if (row.sender_id === "self-" + userId) return;
+
+          if (row.type === "message") {
+            const msg: ChatMessage = {
+              type: "message",
+              id: row.id,
+              senderId: row.sender_id,
+              senderLabel: row.sender_label,
+              content: row.content,
+              timestamp: new Date(row.created_at).getTime(),
+            };
+            addMessage(msg);
+          } else if (row.type === "system") {
+            const msg: SystemMessage = {
+              type: "system",
+              id: row.id,
+              content: row.content,
+              timestamp: new Date(row.created_at).getTime(),
+            };
+            addMessage(msg);
+          } else if (row.type === "file") {
+            const { data } = supabase.storage
+              .from("chat-files")
+              .getPublicUrl(row.storage_path);
+            const msg: FileMessage = {
+              type: "file",
+              id: row.id,
+              senderId: row.sender_id,
+              senderLabel: row.sender_label,
+              fileName: row.file_name,
+              fileSize: row.file_size,
+              mimeType: row.mime_type,
+              url: data.publicUrl,
+              timestamp: new Date(row.created_at).getTime(),
+            };
+            addMessage(msg);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      supabase.removeChannel(sub);
+    };
+  }, [roomId, userId, addMessage]);
+
   const sendMessage = useCallback(
-    (text: string) => {
-      if (!text.trim()) return;
-      const msg: ChatMessage = {
+    async (text: string) => {
+      if (!text.trim() || !roomId) return;
+      const id = crypto.randomUUID();
+      const now = Date.now();
+
+      const localMsg: ChatMessage = {
         type: "message",
-        id: crypto.randomUUID(),
+        id,
         senderId: "self",
         senderLabel: userId,
         content: text.trim(),
-        timestamp: Date.now(),
+        timestamp: now,
       };
-      addMessage(msg);
-      sendToPeers(msg);
+      addMessage(localMsg);
+
+      const { error } = await supabase.from("messages").insert({
+        id,
+        room_id: roomId,
+        sender_id: "self-" + userId,
+        sender_label: userId,
+        type: "message",
+        content: text.trim(),
+      });
+
+      if (error) {
+        seenIdsRef.current.delete(id);
+        setMessages((prev) => prev.filter((m) => m.id !== id));
+      }
     },
-    [userId, sendToPeers, addMessage]
+    [roomId, userId, addMessage]
   );
 
-  const handleIncomingData = useCallback(
-    (data: PeerData | FileMessage, _fromPeerId: string) => {
-      if ((data as any).type === "file-message") {
-        addMessage(data as FileMessage);
-        return;
-      }
-      const peerData = data as PeerData;
-      switch (peerData.type) {
-        case "message":
-          addMessage(peerData as ChatMessage);
-          break;
-
-        case "system":
-          addMessage(peerData as SystemMessage);
-          break;
-
-        case "file-meta": {
-          const meta = data as FileMeta;
-          pendingFilesRef.current.set(meta.fileId, {
-            meta,
-            chunks: new Array(meta.totalChunks),
-            received: 0,
-          });
-          setFileTransfers((prev) => {
-            const next = new Map(prev);
-            next.set(meta.fileId, {
-              fileName: meta.name,
-              totalChunks: meta.totalChunks,
-              received: 0,
-            });
-            return next;
-          });
-          break;
-        }
-
-        case "file-chunk": {
-          const chunk = data as FileChunk;
-          const pending = pendingFilesRef.current.get(chunk.fileId);
-          if (pending) {
-            pending.chunks[chunk.chunkIndex] = chunk.data;
-            pending.received++;
-            const received = pending.received;
-            setFileTransfers((prev) => {
-              const next = new Map(prev);
-              const entry = next.get(chunk.fileId);
-              if (entry) {
-                next.set(chunk.fileId, { ...entry, received });
-              }
-              return next;
-            });
-          }
-          break;
-        }
-
-        case "file-end": {
-          const end = data as FileEnd;
-          const file = pendingFilesRef.current.get(end.fileId);
-          if (file) {
-            if (file.received !== file.meta.totalChunks) {
-              console.warn(
-                `Incomplete file transfer for "${file.meta.name}": received ${file.received}/${file.meta.totalChunks} chunks. Skipping assembly.`
-              );
-              pendingFilesRef.current.delete(end.fileId);
-              setFileTransfers((prev) => {
-                const next = new Map(prev);
-                next.delete(end.fileId);
-                return next;
-              });
-              break;
-            }
-
-            const blob = new Blob(file.chunks, { type: file.meta.mimeType });
-            const objectUrl = URL.createObjectURL(blob);
-            objectUrlsRef.current.push(objectUrl);
-
-            const fileMsg: FileMessage = {
-              type: "file-message",
-              id: file.meta.id,
-              senderId: file.meta.senderId,
-              senderLabel: file.meta.senderLabel,
-              fileName: file.meta.name,
-              fileSize: file.meta.size,
-              mimeType: file.meta.mimeType,
-              objectUrl,
-              timestamp: file.meta.timestamp,
-            };
-            addMessage(fileMsg);
-            pendingFilesRef.current.delete(end.fileId);
-            setFileTransfers((prev) => {
-              const next = new Map(prev);
-              next.delete(end.fileId);
-              return next;
-            });
-          }
-          break;
-        }
-
-        default:
-          break;
-      }
+  const addLocalFileMessage = useCallback(
+    (msg: FileMessage) => {
+      addMessage(msg);
     },
     [addMessage]
   );
 
   const cleanup = useCallback(() => {
-    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    objectUrlsRef.current = [];
+    setMessages([]);
+    seenIdsRef.current.clear();
   }, []);
 
-  return { messages, fileTransfers, sendMessage, handleIncomingData, cleanup };
+  return { messages, sendMessage, addLocalFileMessage, cleanup };
 }

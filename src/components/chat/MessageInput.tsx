@@ -2,8 +2,8 @@ import { useState, useRef, useCallback, KeyboardEvent, DragEvent } from "react";
 import { Paperclip, Send } from "lucide-react";
 
 interface MessageInputProps {
-  onSendMessage: (text: string) => void;
-  onSendFile: (file: File) => void;
+  onSendMessage: (text: string) => void | Promise<void>;
+  onSendFile: (file: File) => void | Promise<void>;
   disabled: boolean;
 }
 

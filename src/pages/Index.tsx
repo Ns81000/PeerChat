@@ -37,17 +37,17 @@ const LandingPage = () => {
         </div>
 
         <p className="text-xs text-muted-foreground">
-          No accounts. No storage. No trace.
+          No accounts. No history. Rooms vanish when you leave.
         </p>
 
         <div className="mt-8 flex gap-8 text-muted-foreground">
           <div className="flex flex-col items-center gap-2">
             <Shield className="h-5 w-5" />
-            <span className="text-xs">Encrypted</span>
+            <span className="text-xs">Secure</span>
           </div>
           <div className="flex flex-col items-center gap-2">
             <Zap className="h-5 w-5" />
-            <span className="text-xs">Peer-to-Peer</span>
+            <span className="text-xs">Real-time</span>
           </div>
           <div className="flex flex-col items-center gap-2">
             <Ghost className="h-5 w-5" />

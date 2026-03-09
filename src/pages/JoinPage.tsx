@@ -2,7 +2,7 @@ import { useState, useRef, KeyboardEvent, ClipboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
-import { PIN_LENGTH } from "@/lib/peerConfig";
+import { PIN_LENGTH } from "@/lib/supabase";
 
 const JoinPage = () => {
   const navigate = useNavigate();

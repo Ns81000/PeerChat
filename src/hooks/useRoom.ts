@@ -1,0 +1,257 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { supabase, MAX_USERS } from "@/lib/supabase";
+import type { RealtimeChannel } from "@supabase/supabase-js";
+
+interface UseRoomOptions {
+  pin: string;
+  isHost: boolean;
+}
+
+interface UseRoomReturn {
+  isConnected: boolean;
+  error: string | null;
+  userCount: number;
+  userId: string;
+  userLabel: string;
+  roomId: string | null;
+  channel: RealtimeChannel | null;
+  disconnect: () => Promise<void>;
+}
+
+export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
+  const [isConnected, setIsConnected] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [userCount, setUserCount] = useState(0);
+  const [userId] = useState(() => crypto.randomUUID().slice(0, 8));
+  const [userLabel, setUserLabel] = useState("");
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const channelRef = useRef<RealtimeChannel | null>(null);
+  const roomIdRef = useRef<string | null>(null);
+  const presenceTrackedRef = useRef(false);
+  const disconnectedRef = useRef(false);
+
+  const disconnect = useCallback(async () => {
+    if (disconnectedRef.current) return;
+    disconnectedRef.current = true;
+
+    const ch = channelRef.current;
+    if (ch) {
+      channelRef.current = null;
+      supabase.removeChannel(ch);
+    }
+
+    const rid = roomIdRef.current;
+    if (!rid) return;
+
+    await supabase.from("members").delete().eq("room_id", rid).eq("user_id", userId);
+
+    if (isHost) {
+      const { data: files } = await supabase.storage.from("chat-files").list(pin);
+      if (files?.length) {
+        await supabase.storage.from("chat-files").remove(files.map((f) => `${pin}/${f.name}`));
+      }
+      await supabase.from("messages").delete().eq("room_id", rid);
+      await supabase.from("members").delete().eq("room_id", rid);
+      await supabase.from("rooms").delete().eq("id", rid);
+    }
+  }, [pin, userId, isHost]);
+
+  useEffect(() => {
+    const handler = () => {
+      const rid = roomIdRef.current;
+      if (!rid) return;
+      supabase.from("members").delete().eq("room_id", rid).eq("user_id", userId);
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [userId]);
+
+  useEffect(() => {
+    if (!pin) return;
+    let cancelled = false;
+    disconnectedRef.current = false;
+
+    async function init() {
+      try {
+        if (isHost) {
+          const { data: existing } = await supabase
+            .from("rooms")
+            .select("id")
+            .eq("pin", pin)
+            .maybeSingle();
+
+          if (existing) {
+            if (!cancelled) setError("A room with this PIN already exists.");
+            return;
+          }
+
+          const { data: room, error: roomErr } = await supabase
+            .from("rooms")
+            .insert({ pin, host_id: userId })
+            .select("id")
+            .single();
+
+          if (roomErr || !room) {
+            if (!cancelled) setError("Failed to create room.");
+            return;
+          }
+
+          if (cancelled) {
+            await supabase.from("rooms").delete().eq("id", room.id);
+            return;
+          }
+
+          roomIdRef.current = room.id;
+          setRoomId(room.id);
+
+          const label = "User 1";
+          const { error: memberErr } = await supabase.from("members").insert({
+            room_id: room.id,
+            user_id: userId,
+            user_label: label,
+          });
+          if (memberErr) {
+            if (!cancelled) setError("Failed to join room.");
+            return;
+          }
+
+          setUserLabel(label);
+          setUserCount(1);
+        } else {
+          const { data: room } = await supabase
+            .from("rooms")
+            .select("id")
+            .eq("pin", pin)
+            .maybeSingle();
+
+          if (!room) {
+            if (!cancelled) setError("Room not found. Check your PIN and try again.");
+            return;
+          }
+
+          if (cancelled) return;
+          roomIdRef.current = room.id;
+          setRoomId(room.id);
+
+          const { data: members } = await supabase
+            .from("members")
+            .select("user_id, user_label")
+            .eq("room_id", room.id);
+
+          const currentCount = members?.length ?? 0;
+          if (currentCount >= MAX_USERS) {
+            if (!cancelled) setError("Room is full. Try again later.");
+            return;
+          }
+
+          const existingLabels = new Set(members?.map((m) => m.user_label) ?? []);
+          let labelNum = currentCount + 1;
+          let label = `User ${labelNum}`;
+          while (existingLabels.has(label)) {
+            labelNum++;
+            label = `User ${labelNum}`;
+          }
+
+          const { error: memberErr } = await supabase.from("members").insert({
+            room_id: room.id,
+            user_id: userId,
+            user_label: label,
+          });
+          if (memberErr) {
+            if (!cancelled) setError("Failed to join room.");
+            return;
+          }
+
+          if (cancelled) {
+            await supabase.from("members").delete().eq("room_id", room.id).eq("user_id", userId);
+            return;
+          }
+
+          setUserLabel(label);
+          setUserCount(currentCount + 1);
+        }
+
+        if (cancelled) return;
+
+        const channel = supabase.channel(`room:${pin}`, {
+          config: { broadcast: { self: false } },
+        });
+
+        channel
+          .on("presence", { event: "sync" }, () => {
+            if (!presenceTrackedRef.current) return;
+            const state = channel.presenceState();
+            const count = Object.keys(state).length;
+            setUserCount(count);
+          })
+          .subscribe(async (status) => {
+            if (cancelled) return;
+
+            if (status === "SUBSCRIBED") {
+              await channel.track({ user_id: userId });
+              presenceTrackedRef.current = true;
+              setIsConnected(true);
+              const state = channel.presenceState();
+              setUserCount(Object.keys(state).length);
+            } else if (status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
+              setError("Failed to connect to the room channel. Please try again.");
+            }
+          });
+
+        channelRef.current = channel;
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Connection error");
+        }
+      }
+    }
+
+    init();
+
+    return () => {
+      cancelled = true;
+      presenceTrackedRef.current = false;
+
+      const ch = channelRef.current;
+      if (ch) {
+        channelRef.current = null;
+        supabase.removeChannel(ch);
+      }
+
+      const rid = roomIdRef.current;
+      if (rid) {
+        supabase.from("members").delete().eq("room_id", rid).eq("user_id", userId).then();
+        if (isHost) {
+          supabase.storage
+            .from("chat-files")
+            .list(pin)
+            .then(({ data }) => {
+              if (data?.length) {
+                supabase.storage.from("chat-files").remove(data.map((f) => `${pin}/${f.name}`));
+              }
+            });
+          supabase.from("messages").delete().eq("room_id", rid).then();
+          supabase
+            .from("members")
+            .delete()
+            .eq("room_id", rid)
+            .then(() => {
+              supabase.from("rooms").delete().eq("id", rid).then();
+            });
+        }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pin, isHost]);
+
+  return {
+    isConnected,
+    error,
+    userCount,
+    userId,
+    userLabel,
+    roomId,
+    channel: channelRef.current,
+    disconnect,
+  };
+}
