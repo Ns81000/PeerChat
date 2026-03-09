@@ -4,6 +4,11 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 
 const CHANNEL_MAX_RETRIES = 3;
 const CHANNEL_RETRY_DELAY_MS = 2_000;
+/** Grace period (ms) before treating a presence leave as a real disconnect.
+ *  Mobile browsers suspend WebSockets when the screen is locked or the tab is
+ *  backgrounded — Supabase will auto-reconnect when the user returns, so a
+ *  brief absence should not trigger a "user left" message. */
+const LEAVE_GRACE_MS = 8_000;
 
 interface UseRoomOptions {
   pin: string;
@@ -36,6 +41,8 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
   const presenceTrackedRef = useRef(false);
   const initialSyncDoneRef = useRef(false);
   const disconnectedRef = useRef(false);
+  /** Pending grace-period timers for leave events, keyed by user_id */
+  const leaveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   const disconnect = useCallback(async () => {
     if (disconnectedRef.current) return;
@@ -224,37 +231,74 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
               const count = Object.keys(state).length;
               setUserCount(count);
             })
+            .on("presence", { event: "join" }, ({ newPresences }) => {
+              // If a user reconnects within the grace period, cancel the pending leave
+              for (const p of newPresences) {
+                const data = p as { user_id?: string };
+                if (data.user_id && leaveTimersRef.current.has(data.user_id)) {
+                  clearTimeout(leaveTimersRef.current.get(data.user_id));
+                  leaveTimersRef.current.delete(data.user_id);
+                }
+              }
+            })
             .on("presence", { event: "leave" }, ({ leftPresences }) => {
               if (!initialSyncDoneRef.current || cancelled) return;
 
               for (const p of leftPresences) {
                 const data = p as { user_id?: string; label?: string; is_host?: boolean };
 
-                // If the host left abruptly, all clients should leave
+                // Host leaving is always acted on immediately — no grace period
                 if (data.is_host && !isHost) {
                   setHostLeft(true);
                   return;
                 }
 
-                // Host inserts "user left" system messages for other users
+                // For regular users, wait LEAVE_GRACE_MS before treating as a real leave
+                // so that brief mobile suspensions don't fire false "user left" messages
                 if (
                   isHost &&
                   data.label &&
+                  data.user_id &&
                   !data.is_host &&
                   roomIdRef.current &&
                   !disconnectedRef.current
                 ) {
-                  supabase
-                    .from("messages")
-                    .insert({
-                      id: crypto.randomUUID(),
-                      room_id: roomIdRef.current,
-                      sender_id: "system",
-                      sender_label: "System",
-                      type: "system",
-                      content: `${data.label} left the room`,
-                    })
-                    .then();
+                  const uid = data.user_id;
+                  const label = data.label;
+
+                  // Clear any existing timer for this user (e.g. rapid disconnect/reconnect)
+                  if (leaveTimersRef.current.has(uid)) {
+                    clearTimeout(leaveTimersRef.current.get(uid));
+                  }
+
+                  const timer = setTimeout(() => {
+                    leaveTimersRef.current.delete(uid);
+                    if (cancelled || disconnectedRef.current || !roomIdRef.current) return;
+
+                    // Re-check presence: if the user is back, skip
+                    const ch = channelRef.current;
+                    if (ch) {
+                      const state = ch.presenceState();
+                      const stillPresent = Object.values(state)
+                        .flat()
+                        .some((entry: any) => entry.user_id === uid);
+                      if (stillPresent) return;
+                    }
+
+                    supabase
+                      .from("messages")
+                      .insert({
+                        id: crypto.randomUUID(),
+                        room_id: roomIdRef.current!,
+                        sender_id: "system",
+                        sender_label: "System",
+                        type: "system",
+                        content: `${label} left the room`,
+                      })
+                      .then();
+                  }, LEAVE_GRACE_MS);
+
+                  leaveTimersRef.current.set(uid, timer);
                 }
               }
             })
@@ -312,6 +356,12 @@ export function useRoom({ pin, isHost }: UseRoomOptions): UseRoomReturn {
       cancelled = true;
       presenceTrackedRef.current = false;
       initialSyncDoneRef.current = false;
+
+      // Clear any pending leave grace-period timers
+      for (const timer of leaveTimersRef.current.values()) {
+        clearTimeout(timer);
+      }
+      leaveTimersRef.current.clear();
 
       const ch = channelRef.current;
       if (ch) {
