@@ -4,6 +4,8 @@
 //   TURN_SERVER   — e.g. "free.expressturn.com:3478"
 //   TURN_USERNAME — e.g. "000000002088268790"
 //   TURN_PASSWORD — e.g. "uLmr+9TtQ+i7LMMOfg8OySpdqVA="
+//
+// If not set, returns STUN-only and the client falls back to its built-in public TURN servers.
 
 const STUN_FALLBACK = [
   { urls: "stun:stun.l.google.com:19302" },

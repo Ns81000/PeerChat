@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams, useNavigate } from "react-router-dom";
 import { usePeer } from "@/hooks/usePeer";
+import { clearGuestSession } from "@/lib/peerConfig";
 import { useChat } from "@/hooks/useChat";
 import { useFileTransfer } from "@/hooks/useFileTransfer";
 import ChatHeader from "@/components/chat/ChatHeader";
@@ -85,6 +86,8 @@ const ChatPage = () => {
 
   const confirmLeave = () => {
     setShowLeaveDialog(false);
+    // Clear persisted identity so re-joining this room generates a fresh peer ID
+    if (pin && !isHost) clearGuestSession(pin);
     disconnect();
     navigate("/");
   };

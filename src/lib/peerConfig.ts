@@ -69,5 +69,16 @@ export function hostPeerId(pin: string): string {
 }
 
 export function guestPeerId(pin: string): string {
-  return `pc-${pin}-${crypto.randomUUID().slice(0, 8)}`;
+  const key = `pc-guest-id-${pin}`;
+  const cached = sessionStorage.getItem(key);
+  if (cached) return cached;
+  const id = `pc-${pin}-${crypto.randomUUID().slice(0, 8)}`;
+  sessionStorage.setItem(key, id);
+  return id;
+}
+
+/** Clears the persisted guest identity for a given PIN (call on intentional leave) */
+export function clearGuestSession(pin: string): void {
+  sessionStorage.removeItem(`pc-guest-id-${pin}`);
+  sessionStorage.removeItem(`pc-label-${pin}`);
 }

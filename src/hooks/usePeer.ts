@@ -30,7 +30,12 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
   const [isRoomFull, setIsRoomFull] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [userCount, setUserCount] = useState(1);
-  const [userId, setUserId] = useState("");
+  // Restore saved label so a reconnecting guest keeps the same identity (e.g. "User 2")
+  const [userId, setUserId] = useState(() => {
+    if (isHost) return "User 1";
+    if (pin) return sessionStorage.getItem(`pc-label-${pin}`) || "";
+    return "";
+  });
 
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<Map<string, DataConnection>>(new Map());
@@ -144,6 +149,9 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
           if (data.type === "peer-list") {
             const peerListData = data as PeerList;
             setUserId(peerListData.userLabel);
+            // Persist the assigned label so reconnecting within the same session
+            // sends the correct identity in the hello message
+            sessionStorage.setItem(`pc-label-${pin}`, peerListData.userLabel);
 
             peerListData.peers.forEach((peerId) => {
               if (!connectionsRef.current.has(peerId)) {
@@ -241,21 +249,23 @@ export function usePeer({ pin, isHost, onData }: UsePeerOptions): UsePeerReturn 
         }, GUEST_CONNECT_TIMEOUT_MS);
       }
 
-      peer.on("open", async () => {
+      peer.on("open", () => {
         setIsDisconnected(false);
 
-        // Always wait for TURN servers before making any data connections.
-        // The fetch started in parallel with Peer creation, so most of the
-        // wait is already elapsed. This is critical for mobile/restrictive NATs.
-        try {
-          const servers = await turnPromise;
-          if (!destroyed && !peer.destroyed) {
-            resolvedIceServers = servers;
-            (peer as any).options.config = { iceServers: servers };
-          }
-        } catch {
-          // Proceed with STUN-only
-        }
+        // Inject TURN servers as soon as the fetch resolves (already running in parallel
+        // with Peer creation — no extra latency). We do NOT await here so that:
+        //  • The host room becomes visible instantly (no TURN wait needed to accept guests)
+        //  • The guest starts dialing the host immediately; TURN will be ready well before
+        //    ICE candidate gathering finishes (~300 ms) since the fetch max is 4 s but
+        //    typically completes in <500 ms from the Vercel edge.
+        turnPromise
+          .then((servers) => {
+            if (!destroyed && !peer.destroyed) {
+              resolvedIceServers = servers;
+              (peer as any).options.config = { iceServers: servers };
+            }
+          })
+          .catch(() => {});
 
         if (destroyed || peer.destroyed) return;
 
