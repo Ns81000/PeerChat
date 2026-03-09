@@ -5,16 +5,20 @@ interface MessageInputProps {
   onSendMessage: (text: string) => void | Promise<void>;
   onSendFile: (file: File) => void | Promise<void>;
   disabled: boolean;
+  /** When true only file attachment is blocked — text chat stays enabled */
+  disableFileOnly?: boolean;
 }
 
 const MAX_ROWS = 5;
 const LINE_HEIGHT = 24;
 
-const MessageInput = ({ onSendMessage, onSendFile, disabled }: MessageInputProps) => {
+const MessageInput = ({ onSendMessage, onSendFile, disabled, disableFileOnly }: MessageInputProps) => {
   const [text, setText] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const fileDisabled = disabled || !!disableFileOnly;
 
   const handleSend = () => {
     if (text.trim()) {
@@ -42,7 +46,7 @@ const MessageInput = ({ onSendMessage, onSendFile, disabled }: MessageInputProps
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file && !disabled) {
+    if (file && !fileDisabled) {
       onSendFile(file);
       e.target.value = "";
     }
@@ -51,9 +55,9 @@ const MessageInput = ({ onSendMessage, onSendFile, disabled }: MessageInputProps
   const handleDragOver = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
-      if (!disabled) setIsDragging(true);
+      if (!fileDisabled) setIsDragging(true);
     },
-    [disabled],
+    [fileDisabled],
   );
 
   const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
@@ -65,11 +69,11 @@ const MessageInput = ({ onSendMessage, onSendFile, disabled }: MessageInputProps
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragging(false);
-      if (disabled) return;
+      if (fileDisabled) return;
       const file = e.dataTransfer.files?.[0];
       if (file) onSendFile(file);
     },
-    [disabled, onSendFile],
+    [fileDisabled, onSendFile],
   );
 
   return (
@@ -93,7 +97,7 @@ const MessageInput = ({ onSendMessage, onSendFile, disabled }: MessageInputProps
         />
         <button
           onClick={() => fileInputRef.current?.click()}
-          disabled={disabled}
+          disabled={fileDisabled}
           aria-label="Attach file"
           className="rounded-lg p-2.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
         >

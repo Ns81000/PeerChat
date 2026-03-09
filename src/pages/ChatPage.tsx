@@ -140,7 +140,8 @@ const ChatPage = () => {
       <MessageInput
         onSendMessage={sendMessage}
         onSendFile={sendFile}
-        disabled={!isConnected || isSending}
+        disabled={!isConnected}
+        disableFileOnly={isSending}
       />
 
       <AlertDialog open={showLeaveDialog} onOpenChange={setShowLeaveDialog}>
