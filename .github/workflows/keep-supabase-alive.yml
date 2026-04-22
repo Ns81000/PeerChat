@@ -1,39 +1,270 @@
-name: Keep Supabase Alive
+name: Supabase Keep Alive — Simulated User Activity
 
 on:
   schedule:
-    # Runs every Wednesday and Saturday at 06:00 UTC
-    - cron: "0 6 * * 3,6"
-  workflow_dispatch:
+    # Run 3x per week at DIFFERENT times — looks organic, not robotic
+    # Monday    04:17 UTC  (09:47 IST)
+    # Wednesday 11:43 UTC  (17:13 IST)
+    # Saturday  19:05 UTC  (00:35 IST next day)
+    - cron: "17 4  * * 1"
+    - cron: "43 11 * * 3"
+    - cron: "5  19 * * 6"
+
+  workflow_dispatch:   # Manual trigger for testing
+
+env:
+  SUPA_URL: ${{ secrets.SUPABASE_URL }}
+  SUPA_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
 jobs:
-  ping:
+  simulate_user_activity:
+    name: Simulate Real User Behavior
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+
     steps:
-      - name: Ping Supabase
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      # ── STEP 0: Sanity check secrets ───────────────────────────────────
+      - name: Verify Secrets Configured
         run: |
-          echo "Pinging Supabase to prevent free tier pausing..."
+          if [ -z "$SUPA_URL" ]; then
+            echo "ERROR: SUPABASE_URL secret not set"
+            exit 1
+          fi
+          if [ -z "$SUPA_KEY" ]; then
+            echo "ERROR: SUPABASE_SERVICE_ROLE_KEY secret not set"
+            exit 1
+          fi
+          echo "Secrets verified. Target: $SUPA_URL"
 
-          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "Missing required secrets: SUPABASE_URL and/or SUPABASE_ANON_KEY"
+      # ── STEP 1: Pick a random active user ──────────────────────────────
+      - name: Select Active User
+        id: pick_user
+        run: |
+          echo "Fetching user list..."
+          HTTP_CODE=$(curl -s -o /tmp/users.json -w "%{http_code}" \
+            "${SUPA_URL}/rest/v1/ka_users?select=id,username&limit=5" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}")
+
+          echo "HTTP $HTTP_CODE — $(cat /tmp/users.json)"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Failed to fetch users (HTTP $HTTP_CODE)"
             exit 1
           fi
 
-          RESPONSE=$(curl -sS -o /dev/null -w "%{http_code}" \
-            --max-time 20 \
-            "$SUPABASE_URL/rest/v1/" \
-            -H "apikey: $SUPABASE_ANON_KEY" \
-            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+          USER_ID=$(cat /tmp/users.json | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
 
-          echo "Response status: $RESPONSE"
+          if [ -z "$USER_ID" ]; then
+            echo "ERROR: No user ID found. Re-run SQL setup script."
+            exit 1
+          fi
 
-          if [ "$RESPONSE" -ge 200 ] && [ "$RESPONSE" -lt 500 ]; then
-            echo "Supabase is alive and responding! (HTTP $RESPONSE)"
+          echo "Active user: $USER_ID"
+          echo "user_id=$USER_ID" >> $GITHUB_OUTPUT
+          sleep $((RANDOM % 15 + 3))
+
+      # ── STEP 2: User login — INSERT session ────────────────────────────
+      - name: User Login — Create Session
+        id: login
+        run: |
+          USER_ID="${{ steps.pick_user.outputs.user_id }}"
+          IP="10.$((RANDOM % 255)).$((RANDOM % 255)).$((RANDOM % 254 + 1))"
+          AGENTS=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 Safari/605.1"
+            "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+          )
+          AGENT="${AGENTS[$((RANDOM % ${#AGENTS[@]}))]}"
+
+          echo "Creating session from $IP"
+          HTTP_CODE=$(curl -s -o /tmp/session.json -w "%{http_code}" -X POST \
+            "${SUPA_URL}/rest/v1/ka_sessions" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d "{\"user_id\":\"$USER_ID\",\"ip_address\":\"$IP\",\"user_agent\":\"$AGENT\"}")
+
+          echo "HTTP $HTTP_CODE — $(cat /tmp/session.json)"
+
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "ERROR: Session insert failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          SESSION_ID=$(cat /tmp/session.json | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+          echo "Session created: $SESSION_ID"
+          echo "session_id=$SESSION_ID" >> $GITHUB_OUTPUT
+          sleep $((RANDOM % 20 + 5))
+
+      # ── STEP 3: Log login event ─────────────────────────────────────────
+      - name: Log Login Activity Event
+        run: |
+          USER_ID="${{ steps.pick_user.outputs.user_id }}"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "${SUPA_URL}/rest/v1/ka_activity_log" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"$USER_ID\",\"action\":\"login\",\"metadata\":{\"method\":\"password\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"run_id\":\"${{ github.run_id }}\"}}")
+
+          echo "Log login HTTP $HTTP_CODE"
+          sleep $((RANDOM % 25 + 8))
+
+      # ── STEP 4: Browse dashboard — SELECT queries ───────────────────────
+      - name: Browse Dashboard — SELECT Queries
+        run: |
+          USER_ID="${{ steps.pick_user.outputs.user_id }}"
+
+          echo "Fetching user profile..."
+          curl -s -o /dev/null \
+            "${SUPA_URL}/rest/v1/ka_users?id=eq.${USER_ID}&select=*" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}"
+          sleep $((RANDOM % 12 + 3))
+
+          echo "Fetching settings..."
+          curl -s -o /dev/null \
+            "${SUPA_URL}/rest/v1/ka_settings?user_id=eq.${USER_ID}&select=key,value" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}"
+          sleep $((RANDOM % 18 + 5))
+
+          echo "Fetching recent activity..."
+          curl -s -o /dev/null \
+            "${SUPA_URL}/rest/v1/ka_activity_log?user_id=eq.${USER_ID}&select=action,created_at&order=created_at.desc&limit=10" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}"
+
+          echo "Dashboard browse complete"
+
+      # ── STEP 5: Edit profile — UPDATE user ─────────────────────────────
+      - name: Edit Profile — UPDATE User Record
+        run: |
+          USER_ID="${{ steps.pick_user.outputs.user_id }}"
+          BIOS=(
+            "Building things with code and coffee"
+            "Side project enthusiast, perpetual learner"
+            "Turning caffeine into features since 2019"
+            "Debugging life one commit at a time"
+            "Open source contributor, occasional sleeper"
+          )
+          BIO="${BIOS[$((RANDOM % ${#BIOS[@]}))]}"
+          # Use RANDOM instead of shuf — always available
+          LOGIN_COUNT=$((RANDOM % 500 + 1))
+
+          echo "Updating profile..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+            "${SUPA_URL}/rest/v1/ka_users?id=eq.${USER_ID}" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"bio\":\"$BIO\",\"login_count\":$LOGIN_COUNT,\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}")
+
+          echo "Update profile HTTP $HTTP_CODE"
+          sleep $((RANDOM % 30 + 10))
+
+      # ── STEP 6: Log profile update ──────────────────────────────────────
+      - name: Log Profile Update Event
+        run: |
+          USER_ID="${{ steps.pick_user.outputs.user_id }}"
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "${SUPA_URL}/rest/v1/ka_activity_log" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"user_id\":\"$USER_ID\",\"action\":\"update_profile\",\"metadata\":{\"field\":\"bio\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}")
+
+          echo "Log profile update HTTP $HTTP_CODE"
+          sleep $((RANDOM % 20 + 5))
+
+      # ── STEP 7: Change settings — UPSERT ───────────────────────────────
+      - name: Change Settings — UPSERT Preference
+        run: |
+          USER_ID="${{ steps.pick_user.outputs.user_id }}"
+          THEMES=("dark" "light" "system" "contrast")
+          LANGS=("en" "fr" "de" "es" "ja")
+          THEME="${THEMES[$((RANDOM % ${#THEMES[@]}))]}"
+          LANG="${LANGS[$((RANDOM % ${#LANGS[@]}))]}"
+
+          echo "Setting theme=$THEME language=$LANG"
+          curl -s -o /dev/null -X POST \
+            "${SUPA_URL}/rest/v1/ka_settings" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates" \
+            -d "{\"user_id\":\"$USER_ID\",\"key\":\"theme\",\"value\":\"$THEME\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+
+          sleep $((RANDOM % 10 + 3))
+
+          curl -s -o /dev/null -X POST \
+            "${SUPA_URL}/rest/v1/ka_settings" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates" \
+            -d "{\"user_id\":\"$USER_ID\",\"key\":\"language\",\"value\":\"$LANG\",\"updated_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+
+          echo "Settings updated"
+          sleep $((RANDOM % 20 + 8))
+
+      # ── STEP 8: Logout — DELETE session ────────────────────────────────
+      - name: User Logout — Delete Session
+        run: |
+          SESSION_ID="${{ steps.login.outputs.session_id }}"
+          if [ -n "$SESSION_ID" ]; then
+            echo "Deleting session $SESSION_ID..."
+            curl -s -o /dev/null -X DELETE \
+              "${SUPA_URL}/rest/v1/ka_sessions?id=eq.${SESSION_ID}" \
+              -H "apikey: ${SUPA_KEY}" \
+              -H "Authorization: Bearer ${SUPA_KEY}"
+            echo "Session deleted"
           else
-            echo "Supabase ping failed with status: $RESPONSE"
+            echo "No session ID, skipping logout"
+          fi
+          sleep $((RANDOM % 10 + 2))
+
+      # ── STEP 9: Purge expired sessions ─────────────────────────────────
+      - name: Housekeeping — Purge Expired Sessions
+        run: |
+          echo "Purging expired sessions..."
+          curl -s -o /dev/null -X DELETE \
+            "${SUPA_URL}/rest/v1/ka_sessions?expires_at=lt.$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}"
+          echo "Expired sessions purged"
+
+      # ── STEP 10: Trim old activity logs ────────────────────────────────
+      - name: Housekeeping — Trim Old Activity Logs
+        run: |
+          CUTOFF=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "Trimming logs older than $CUTOFF..."
+          curl -s -o /dev/null -X DELETE \
+            "${SUPA_URL}/rest/v1/ka_activity_log?created_at=lt.${CUTOFF}" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}"
+          echo "Old logs trimmed"
+
+      # ── STEP 11: Final health check ─────────────────────────────────────
+      - name: Final Health Check
+        run: |
+          echo "Running final health check..."
+          HTTP_CODE=$(curl -s -o /tmp/health.json -w "%{http_code}" \
+            "${SUPA_URL}/rest/v1/ka_users?select=id,updated_at&limit=1" \
+            -H "apikey: ${SUPA_KEY}" \
+            -H "Authorization: Bearer ${SUPA_KEY}")
+
+          BODY=$(cat /tmp/health.json)
+          echo "HTTP $HTTP_CODE — $BODY"
+
+          if [ "$HTTP_CODE" != "200" ] || [ "$BODY" = "[]" ] || [ -z "$BODY" ]; then
+            echo "FAILED: Health check did not return data (HTTP $HTTP_CODE)"
             exit 1
           fi
+
+          echo "Health check passed."
+          echo "Run complete. ID=${{ github.run_id }} Time=$(date -u)"
